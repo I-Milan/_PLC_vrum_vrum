@@ -55,17 +55,26 @@ class WallFollower(Node):
         self.angle_b_deg = float(self.declare_parameter('angle_b_deg', 45.0).value)
         self.forward_half_fov_deg = float(self.declare_parameter('forward_half_fov_deg', 15.0).value)
 
-        # bal/jobb tükrözés: jobb oldalnál a szögek negatívak
+        # ÚJ: Előrejelző 25°-os sugár
+        self.angle_c_deg = float(self.declare_parameter('angle_c_deg', 25.0).value)
+
+        # bal/jobb tükrözés
         self.sign = 1.0 if self.side == 'left' else -1.0
         self.angle_a = math.radians(self.sign * self.angle_a_deg)
         self.angle_b = math.radians(self.sign * self.angle_b_deg)
+        self.angle_c = math.radians(self.sign * self.angle_c_deg)
+
         self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)  # 0..1
+
         # PID állapotok
         self.int_err = 0.0
         self.prev_err = 0.0
         self.prev_t = None
         self._w_filt = 0.0
-        # QoS: szenzor adat
+
+        # Módok: NORMAL (fal követés), TURN (kanyar belépés)
+        self.mode = "NORMAL"
+
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -79,12 +88,12 @@ class WallFollower(Node):
 
         self.get_logger().info(f'teszt2_wall_follower running. side={self.side}, desired={self.desired} m')
 
-    # --- LiDAR segédfüggvények ---
+
+    # --- LiDAR alap funkciók ---
     def _angle_to_index(self, scan: LaserScan, angle_rad: float) -> int:
         inc = scan.angle_increment
         if inc == 0.0:
             return 0
-        # inc>0: index nő a szöggel; inc<0: fordítva
         if inc > 0.0:
             idx = int(round((angle_rad - scan.angle_min) / inc))
         else:
@@ -92,7 +101,6 @@ class WallFollower(Node):
         return clamp(idx, 0, len(scan.ranges) - 1)
 
     def _get_range_at(self, scan: LaserScan, angle_rad: float, half_window: int = 1) -> float:
-        """Közeli indexek átlagát veszi, inf/NaN helyett clip_maxot használ."""
         i_center = self._angle_to_index(scan, angle_rad)
         lo = clamp(i_center - half_window, 0, len(scan.ranges) - 1)
         hi = clamp(i_center + half_window, 0, len(scan.ranges) - 1)
@@ -110,7 +118,6 @@ class WallFollower(Node):
 
     def _min_forward(self, scan: LaserScan) -> float:
         half = math.radians(self.forward_half_fov_deg)
-        # bejárjuk a [-half, +half] tartományt
         idx_lo = self._angle_to_index(scan, -half)
         idx_hi = self._angle_to_index(scan, +half)
         lo, hi = (idx_lo, idx_hi) if idx_lo <= idx_hi else (idx_hi, idx_lo)
@@ -121,22 +128,11 @@ class WallFollower(Node):
                 mins = min(mins, min(r, self.range_clip_max))
         return mins
 
-    # --- Fal-követő geometria (két pont módszer) ---
-    def _compute_error(self, scan: LaserScan) -> float:
-        """
-        Veszünk két távolságot az oldalsó irányban:
-          b a "közelebbi" (45°), a a "oldal" (90°).
-        Beta = |90° - 45°| = 45°.
-        Idézett képlet:
-          theta = atan2(a*cos(beta) - b, a*sin(beta))
-          d_t   = b*cos(theta) - L*sin(theta)
-        Hibánk: e = desired - d_t
-        """
+    def _compute_error(self, scan: LaserScan):
         beta = abs(self.angle_a - self.angle_b)
         a = self._get_range_at(scan, self.angle_a, half_window=1)
         b = self._get_range_at(scan, self.angle_b, half_window=1)
 
-        # stabilitás: ha túl nagyok (nincs fal), vegyünk semleges értéket
         a = min(a, self.range_clip_max)
         b = min(b, self.range_clip_max)
 
@@ -146,81 +142,71 @@ class WallFollower(Node):
         err = self.desired - d_t
         return err, theta, a, b, d_t
 
+
+    # --- Main control ---
     def scan_cb(self, scan: LaserScan):
         now = self.get_clock().now().nanoseconds * 1e-9
         dt = 0.0 if self.prev_t is None else max(1e-3, now - self.prev_t)
         self.prev_t = now
 
-        # Biztonság: legkisebb előre mért távolság (±forward_half_fov_deg)
         min_fwd = self._min_forward(scan)
 
-        # Falszög-alapú hibaszámítás (két-sugaras geometria)
-        err_raw, theta, a, b, d_t = self._compute_error(scan)
+        # Falgeometria (normál szabályozás alapja)
+        err_raw, theta, a, b45, d_t = self._compute_error(scan)
+
+        # Kanyar-előrejelzés (25° két oldal)
+        b25 = self._get_range_at(scan, self.angle_c, half_window=1)      # saját oldali előrejelzés
+        b25_opp = self._get_range_at(scan, -self.angle_c, half_window=1) # túloldali előrejelzés
+
+        # Kanyar irány detektálás → desired_distance módosítása
+        desired_dynamic = self.desired
+        if b25 > b25_opp * 1.2:     # Ha a robot oldalán lévő 25° sugár sokkal hosszabb → a túloldali fal jön → húzódj közelebb ehhez az oldalhoz
+            desired_dynamic -= 0.25
+        elif b25_opp > b25 * 1.2:   # Fordítva → távolodj kicsit
+            desired_dynamic += 0.25
+
+        # Hibát ezzel az új desireddel számoljuk újra
+        err_raw = desired_dynamic - d_t
         err = self.med_err.push(err_raw)
 
-        # --- PID állapotok és anti-windup ---
-        prev_err_prior = self.prev_err
+        # --- KANYAR BELÉPÉS FELISMERÉS 45°-ral ---
+        lose_wall_threshold = 1.5
+        if b45 > lose_wall_threshold:
+            # TURN MODE: Max kormányszög
+            v = 0.0
+            w = (-self.sign) * self.w_lim
+            cmd = Twist()
+            cmd.linear.x = v
+            cmd.angular.z = w
+            self.cmd_pub.publish(cmd)
+            return
+
+        # --- PID fal-követés ---
         self.int_err += err * dt
-
-        # Integrál bilincs
-        i_max = 1.0  # ha szeretnéd, vidd ki paraméterbe
-        self.int_err = clamp(self.int_err, -i_max, i_max)
-
-        # Ha irányt vált a hiba vagy elöl közel akadály van, nullázzuk az integrált
-        if err * prev_err_prior < 0.0 or min_fwd < self.slow_down_dist:
-            self.int_err = 0.0
-
-        # Derivált a KORÁBBI hibához képest
-        der = (err - prev_err_prior) / dt if dt > 0.0 else 0.0
+        self.int_err = clamp(self.int_err, -1.0, 1.0)
+        der = (err - self.prev_err) / dt if dt > 0 else 0.0
         self.prev_err = err
 
-        # PID kimenet, oldalfüggő előjellel
-        w = self.kp * err + self.ki * self.int_err + self.kd * der
-        w = -self.sign * w  # bal: sign=+1 → túl közel => w<0 ; jobb: sign=-1 → túl közel => w>0
+        w = self.kp * err + self.kd * der
+        w = -self.sign * w
 
-        # Deadband: kis hiba esetén ne kormányozzon
-        err_deadband = 0.02  # ~2 cm
-        if abs(err) < err_deadband:
-            w = 0.0
-            self.int_err *= 0.5  # integrált "elengedése", hogy ne túlhúzzon vissza
-
-        # Alapsebesség
         v = self.v_lin
-
-        # Kanyarfüggő lassítás (stabilitás)
         turn_slowdown = max(0.2, 1.0 - (abs(w) / max(self.w_lim, 1e-6)))
         v = max(self.v_lin_min, v * turn_slowdown)
 
-        # Előre közeli akadálynál további lassítás / megállás
         if min_fwd < self.slow_down_dist:
             v = max(self.v_lin_min, v * 0.35)
 
-        if min_fwd < self.stop_dist:
-            # Nagyon közel: álljunk meg és forduljunk el a követett faltól
-            v = 0.0
-            w = (-self.sign) * 0.8 * self.w_lim
-            # Stop-helyzetben ne LPF-eljük, azonnali hatás kell
-            self._w_filt = w
-        else:
-            # Low-pass szűrés a kormányra (LPF)
-            alpha = clamp(self.steer_lpf_alpha, 0.0, 1.0)
-            self._w_filt = (1.0 - alpha) * self._w_filt + alpha * w
-            w = self._w_filt
+        alpha = clamp(self.steer_lpf_alpha, 0.0, 1.0)
+        self._w_filt = (1.0 - alpha) * self._w_filt + alpha * w
+        w = clamp(self._w_filt, -self.w_lim, self.w_lim)
 
-            # Korlátozás
-            w = clamp(w, -self.w_lim, self.w_lim)
-
-        # Publikálás
         cmd = Twist()
         cmd.linear.x = v
         cmd.angular.z = w
         self.cmd_pub.publish(cmd)
 
-        # Debug log
-        self.get_logger().debug(
-            f"side={self.side} err={err:.3f} theta={math.degrees(theta):.1f} "
-            f"a={a:.2f} b={b:.2f} d_t={d_t:.2f} min_fwd={min_fwd:.2f} v={v:.2f} w={w:.2f}"
-        )
+
 def main():
     rclpy.init()
     node = WallFollower()
