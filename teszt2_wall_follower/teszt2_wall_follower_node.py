@@ -33,18 +33,18 @@ class AdvancedWallFollower(Node):
         self.desired_distance = float(self.declare_parameter('desired_distance', 0.2).value)  # 20 cm
         
         # PID parameters for 90° wall following
-        self.kp = float(self.declare_parameter('kp', 2.5).value)
+        self.kp = float(self.declare_parameter('kp', 3.0).value)
         self.ki = float(self.declare_parameter('ki', 0.0).value)
-        self.kd = float(self.declare_parameter('kd', 0.3).value)
+        self.kd = float(self.declare_parameter('kd', 0.4).value)
         
-        # Speed parameters
-        self.v_lin = float(self.declare_parameter('linear_speed', 0.4).value)
-        self.v_lin_min = float(self.declare_parameter('linear_speed_min', 0.1).value)
-        self.w_lim = float(self.declare_parameter('angular_speed_limit', 2.0).value)
+        # Speed parameters - DUPLÁZVA
+        self.v_lin = float(self.declare_parameter('linear_speed', 0.8).value)  # 0.4 → 0.8
+        self.v_lin_min = float(self.declare_parameter('linear_speed_min', 0.2).value)  # 0.1 → 0.2
+        self.w_lim = float(self.declare_parameter('angular_speed_limit', 3.0).value)  # 2.0 → 3.0
         
         # Safety distances
-        self.slow_down_dist = float(self.declare_parameter('slow_down_distance', 0.5).value)
-        self.stop_dist = float(self.declare_parameter('stop_distance', 0.25).value)
+        self.slow_down_dist = float(self.declare_parameter('slow_down_distance', 0.6).value)
+        self.stop_dist = float(self.declare_parameter('stop_distance', 0.3).value)
         
         # Filter parameters
         self.median_window = int(self.declare_parameter('median_window', 5).value)
@@ -87,7 +87,7 @@ class AdvancedWallFollower(Node):
         self.scan_sub = self.create_subscription(LaserScan, 'scan', self.scan_cb, qos)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
-        self.get_logger().info('Advanced wall follower started - Triple angle detection active')
+        self.get_logger().info('Advanced wall follower started - HIGH SPEED MODE')
 
     def _angle_to_index(self, scan: LaserScan, angle_rad: float) -> int:
         inc = scan.angle_increment
@@ -197,24 +197,27 @@ class AdvancedWallFollower(Node):
         
         # Step 4: Determine final angular velocity
         if self.turn_initiated and self.current_turn_side:
-            # Full turn during cornering
+            # Full turn during cornering - GYORSABB KANYARODÁS
             if self.current_turn_side == 'right':
-                w = -self.w_lim  # Turn right
+                w = -self.w_lim * 1.2  # Turn right - még gyorsabban
             else:  # left turn
-                w = self.w_lim   # Turn left
+                w = self.w_lim * 1.2   # Turn left - még gyorsabban
         else:
             # Normal PID control
             w = clamp(w_pid, -self.w_lim, self.w_lim)
         
-        # Step 5: Determine linear velocity
+        # Step 5: Determine linear velocity - KEVESBÉ LASSÍT
         v = self.v_lin
         
-        # Slow down based on forward obstacles
+        # Forward looking for obstacles - TÁVOLABBI LASSÍTÁS
         forward_min = min(ranges['left_45'], ranges['right_45'], 
                          ranges['left_25'], ranges['right_25'])
         
+        # Only slow down when really close
         if forward_min < self.slow_down_dist:
-            v = max(self.v_lin_min, v * 0.4)
+            # Kisebb lassítás mértéke
+            slow_factor = max(0.6, forward_min / self.slow_down_dist)  # 0.4 → 0.6
+            v = max(self.v_lin_min, v * slow_factor)
         
         if forward_min < self.stop_dist:
             v = 0.0
@@ -233,8 +236,8 @@ class AdvancedWallFollower(Node):
                 self.current_turn_side = None
                 self.get_logger().info('Left turn completed')
         
-        # Deadband for small errors
-        if abs(error) < 0.01 and not self.turn_initiated:
+        # Deadband for small errors - KISEBB HOLT SÁV
+        if abs(error) < 0.005 and not self.turn_initiated:  # 0.01 → 0.005
             w = 0.0
         
         # Publish command
