@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>teszt2_wall_follower</name>
+  <version>0.1.0</version>
+  <description>LiDAR alapú fal-követő vezérlés bal/jobb oldalra, ROS 2 Humble</description>
+
+  <maintainer email="levente.vass@ddc.sze.hu">Your Name</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

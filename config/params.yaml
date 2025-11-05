@@ -1,0 +1,35 @@
+teszt2_wall_follower:
+  ros__parameters:
+    # melyik oldali falat kövessük: "left" vagy "right"
+    side: "left"
+
+    # kívánt távolság a faltól [m]
+    desired_distance: 1.2
+
+    # előrelátási távolság a geometriai (két pont) falszög becsléshez [m]
+    lookahead_distance: 0.5
+
+    # PID tagok (szögsebességre)
+    kp: 1.2
+    ki: 0.1
+    kd: 0.
+
+    # sebességek
+    linear_speed: 0.5
+    linear_speed_min: 0.15
+    angular_speed_limit: 1.8
+
+    # óvatosság: ha előre kis szögben (±15°) közelebb van akadály, lassít/fordul
+    slow_down_distance: 0.8
+    stop_distance: 0.35
+
+    # szűrés és numerika
+    median_window: 5
+    range_clip_max: 10.0     # ha inf, ide klippeljük
+    valid_min: 0.03
+
+    # melyik szögeket mintázzuk (fokban) – bal: 90° és 45°, jobb: -90° és -45°
+    angle_a_deg: 90.0
+    angle_b_deg: 45.0
+    forward_half_fov_deg: 15.0
+    
