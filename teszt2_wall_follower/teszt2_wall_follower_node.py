@@ -37,10 +37,10 @@ class AdvancedWallFollower(Node):
         self.ki = float(self.declare_parameter('ki', 0.0).value)
         self.kd = float(self.declare_parameter('kd', 0.4).value)
         
-        # Speed parameters - DUPLÁZVA
-        self.v_lin = float(self.declare_parameter('linear_speed', 0.8).value)  # 0.4 → 0.8
-        self.v_lin_min = float(self.declare_parameter('linear_speed_min', 0.2).value)  # 0.1 → 0.2
-        self.w_lim = float(self.declare_parameter('angular_speed_limit', 3.0).value)  # 2.0 → 3.0
+        # Speed parameters
+        self.v_lin = float(self.declare_parameter('linear_speed', 0.8).value)
+        self.v_lin_min = float(self.declare_parameter('linear_speed_min', 0.2).value)
+        self.w_lim = float(self.declare_parameter('angular_speed_limit', 3.0).value)
         
         # Safety distances
         self.slow_down_dist = float(self.declare_parameter('slow_down_distance', 0.6).value)
@@ -52,8 +52,11 @@ class AdvancedWallFollower(Node):
         self.valid_min = float(self.declare_parameter('valid_min', 0.03).value)
         
         # Turn detection thresholds
-        self.turn_threshold = float(self.declare_parameter('turn_threshold', 1.5).value)  # meters
+        self.turn_threshold = float(self.declare_parameter('turn_threshold', 1.5).value)
         self.wall_disappear_threshold = float(self.declare_parameter('wall_disappear_threshold', 2.0).value)
+        
+        # Maximum approach angle (degrees)
+        self.max_approach_angle = math.radians(float(self.declare_parameter('max_approach_angle', 15.0).value))
         
         # Angles for triple sensing (degrees)
         self.angle_90 = math.radians(90)
@@ -87,7 +90,7 @@ class AdvancedWallFollower(Node):
         self.scan_sub = self.create_subscription(LaserScan, 'scan', self.scan_cb, qos)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
-        self.get_logger().info('Advanced wall follower started - HIGH SPEED MODE')
+        self.get_logger().info('Advanced wall follower started - PARALLEL APPROACH MODE')
 
     def _angle_to_index(self, scan: LaserScan, angle_rad: float) -> int:
         inc = scan.angle_increment
@@ -147,9 +150,16 @@ class AdvancedWallFollower(Node):
         if turn_side == 'right':
             # Follow left wall during right turn
             error = self.desired_distance - ranges['left_90']
+            # Párhuzamos közeledés - korlátozzuk a maximális szöget
+            max_error_for_angle = math.tan(self.max_approach_angle) * ranges['left_90']
+            error = clamp(error, -max_error_for_angle, max_error_for_angle)
+            
         elif turn_side == 'left':
             # Follow right wall during left turn  
             error = self.desired_distance - ranges['right_90']
+            # Párhuzamos közeledés - korlátozzuk a maximális szöget
+            max_error_for_angle = math.tan(self.max_approach_angle) * ranges['right_90']
+            error = clamp(error, -max_error_for_angle, max_error_for_angle)
         else:
             # Normal straight - follow closer wall
             left_error = self.desired_distance - ranges['left_90']
@@ -190,33 +200,32 @@ class AdvancedWallFollower(Node):
         if self.current_turn_side and not self.turn_initiated:
             if self._detect_turn_start(ranges, self.current_turn_side):
                 self.turn_initiated = True
-                self.get_logger().info(f'Starting {self.current_turn_side} turn')
+                self.get_logger().info(f'Starting {self.current_turn_side} turn - Parallel approach active')
         
         # Step 3: Compute control outputs
         w_pid, error = self._compute_pid_output(ranges, dt, self.current_turn_side)
         
         # Step 4: Determine final angular velocity
         if self.turn_initiated and self.current_turn_side:
-            # Full turn during cornering - GYORSABB KANYARODÁS
+            # Full turn during cornering
             if self.current_turn_side == 'right':
-                w = -self.w_lim * 1.2  # Turn right - még gyorsabban
+                w = -self.w_lim * 1.2  # Turn right
             else:  # left turn
-                w = self.w_lim * 1.2   # Turn left - még gyorsabban
+                w = self.w_lim * 1.2   # Turn left
         else:
             # Normal PID control
             w = clamp(w_pid, -self.w_lim, self.w_lim)
         
-        # Step 5: Determine linear velocity - KEVESBÉ LASSÍT
+        # Step 5: Determine linear velocity
         v = self.v_lin
         
-        # Forward looking for obstacles - TÁVOLABBI LASSÍTÁS
+        # Forward looking for obstacles
         forward_min = min(ranges['left_45'], ranges['right_45'], 
                          ranges['left_25'], ranges['right_25'])
         
         # Only slow down when really close
         if forward_min < self.slow_down_dist:
-            # Kisebb lassítás mértéke
-            slow_factor = max(0.6, forward_min / self.slow_down_dist)  # 0.4 → 0.6
+            slow_factor = max(0.6, forward_min / self.slow_down_dist)
             v = max(self.v_lin_min, v * slow_factor)
         
         if forward_min < self.stop_dist:
@@ -227,17 +236,19 @@ class AdvancedWallFollower(Node):
         
         # Reset turn state when turn is complete
         if self.turn_initiated:
+            turn_complete = False
             if self.current_turn_side == 'right' and ranges['left_45'] < self.wall_disappear_threshold:
-                self.turn_initiated = False
-                self.current_turn_side = None
-                self.get_logger().info('Right turn completed')
+                turn_complete = True
             elif self.current_turn_side == 'left' and ranges['right_45'] < self.wall_disappear_threshold:
+                turn_complete = True
+                
+            if turn_complete:
                 self.turn_initiated = False
                 self.current_turn_side = None
-                self.get_logger().info('Left turn completed')
+                self.get_logger().info(f'{self.current_turn_side} turn completed')
         
-        # Deadband for small errors - KISEBB HOLT SÁV
-        if abs(error) < 0.005 and not self.turn_initiated:  # 0.01 → 0.005
+        # Deadband for small errors
+        if abs(error) < 0.005 and not self.turn_initiated:
             w = 0.0
         
         # Publish command
@@ -245,6 +256,9 @@ class AdvancedWallFollower(Node):
         cmd.linear.x = v
         cmd.angular.z = w
         self.cmd_pub.publish(cmd)
+        
+        # Debug info
+        self.get_logger().debug(f'V: {v:.2f}, W: {w:.2f}, Turn: {self.current_turn_side}, Error: {error:.3f}')
 
     def destroy_node(self):
         # Stop the robot when shutting down
