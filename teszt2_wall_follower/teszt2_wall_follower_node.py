@@ -55,25 +55,17 @@ class WallFollower(Node):
         self.angle_b_deg = float(self.declare_parameter('angle_b_deg', 45.0).value)
         self.forward_half_fov_deg = float(self.declare_parameter('forward_half_fov_deg', 15.0).value)
 
-        # ÚJ: Előrejelző 25°-os sugár
-        self.angle_c_deg = float(self.declare_parameter('angle_c_deg', 25.0).value)
-
-        # bal/jobb tükrözés
+        # Left/right side selection
         self.sign = 1.0 if self.side == 'left' else -1.0
         self.angle_a = math.radians(self.sign * self.angle_a_deg)
         self.angle_b = math.radians(self.sign * self.angle_b_deg)
-        self.angle_c = math.radians(self.sign * self.angle_c_deg)
 
-        self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)  # 0..1
+        self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)
 
-        # PID állapotok
         self.int_err = 0.0
         self.prev_err = 0.0
         self.prev_t = None
         self._w_filt = 0.0
-
-        # Módok: NORMAL (fal követés), TURN (kanyar belépés)
-        self.mode = "NORMAL"
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -88,8 +80,7 @@ class WallFollower(Node):
 
         self.get_logger().info(f'teszt2_wall_follower running. side={self.side}, desired={self.desired} m')
 
-
-    # --- LiDAR alap funkciók ---
+    # --- LiDAR helpers ---
     def _angle_to_index(self, scan: LaserScan, angle_rad: float) -> int:
         inc = scan.angle_increment
         if inc == 0.0:
@@ -142,64 +133,73 @@ class WallFollower(Node):
         err = self.desired - d_t
         return err, theta, a, b, d_t
 
-
-    # --- Main control ---
     def scan_cb(self, scan: LaserScan):
         now = self.get_clock().now().nanoseconds * 1e-9
         dt = 0.0 if self.prev_t is None else max(1e-3, now - self.prev_t)
         self.prev_t = now
 
-        min_fwd = self._min_forward(scan)
+        # --- ✅ NEW: SAFETY OVERRIDE BASED ON SIDE WALLS (±90°) ---
+        a_left = self._get_range_at(scan, math.radians(+90))
+        a_right = self._get_range_at(scan, math.radians(-90))
+        SAFETY_LIMIT = 2.0  # meters
 
-        # Falgeometria (normál szabályozás alapja)
-        err_raw, theta, a, b45, d_t = self._compute_error(scan)
-
-        # Kanyar-előrejelzés (25° két oldal)
-        b25 = self._get_range_at(scan, self.angle_c, half_window=1)      # saját oldali előrejelzés
-        b25_opp = self._get_range_at(scan, -self.angle_c, half_window=1) # túloldali előrejelzés
-
-        # Kanyar irány detektálás → desired_distance módosítása
-        desired_dynamic = self.desired
-        if b25 > b25_opp * 1.2:     # Ha a robot oldalán lévő 25° sugár sokkal hosszabb → a túloldali fal jön → húzódj közelebb ehhez az oldalhoz
-            desired_dynamic -= 0.25
-        elif b25_opp > b25 * 1.2:   # Fordítva → távolodj kicsit
-            desired_dynamic += 0.25
-
-        # Hibát ezzel az új desireddel számoljuk újra
-        err_raw = desired_dynamic - d_t
-        err = self.med_err.push(err_raw)
-
-        # --- KANYAR BELÉPÉS FELISMERÉS 45°-ral ---
-        lose_wall_threshold = 1.5
-        if b45 > lose_wall_threshold:
-            # TURN MODE: Max kormányszög
-            v = 0.0
-            w = (-self.sign) * self.w_lim
+        if a_left > SAFETY_LIMIT:
+            # turn right MAX
             cmd = Twist()
-            cmd.linear.x = v
-            cmd.angular.z = w
+            cmd.linear.x = self.v_lin
+            cmd.angular.z = -self.w_lim
             self.cmd_pub.publish(cmd)
             return
 
-        # --- PID fal-követés ---
+        if a_right > SAFETY_LIMIT:
+            # turn left MAX
+            cmd = Twist()
+            cmd.linear.x = self.v_lin
+            cmd.angular.z = +self.w_lim
+            self.cmd_pub.publish(cmd)
+            return
+
+        # --- Normal logic below ---
+        min_fwd = self._min_forward(scan)
+
+        err_raw, theta, a, b, d_t = self._compute_error(scan)
+        err = self.med_err.push(err_raw)
+
+        prev_err_prior = self.prev_err
         self.int_err += err * dt
-        self.int_err = clamp(self.int_err, -1.0, 1.0)
-        der = (err - self.prev_err) / dt if dt > 0 else 0.0
+        i_max = 1.0
+        self.int_err = clamp(self.int_err, -i_max, i_max)
+
+        if err * prev_err_prior < 0.0 or min_fwd < self.slow_down_dist:
+            self.int_err = 0.0
+
+        der = (err - prev_err_prior) / dt if dt > 0.0 else 0.0
         self.prev_err = err
 
-        w = self.kp * err + self.kd * der
+        w = self.kp * err + self.ki * self.int_err + self.kd * der
         w = -self.sign * w
 
+        err_deadband = 0.02
+        if abs(err) < err_deadband:
+            w = 0.0
+            self.int_err *= 0.5
+
         v = self.v_lin
+
         turn_slowdown = max(0.2, 1.0 - (abs(w) / max(self.w_lim, 1e-6)))
         v = max(self.v_lin_min, v * turn_slowdown)
 
         if min_fwd < self.slow_down_dist:
             v = max(self.v_lin_min, v * 0.35)
 
-        alpha = clamp(self.steer_lpf_alpha, 0.0, 1.0)
-        self._w_filt = (1.0 - alpha) * self._w_filt + alpha * w
-        w = clamp(self._w_filt, -self.w_lim, self.w_lim)
+        if min_fwd < self.stop_dist:
+            v = 0.0
+            w = (-self.sign) * 0.8 * self.w_lim
+            self._w_filt = w
+        else:
+            alpha = clamp(self.steer_lpf_alpha, 0.0, 1.0)
+            self._w_filt = (1.0 - alpha) * self._w_filt + alpha * w
+            w = clamp(self._w_filt, -self.w_lim, self.w_lim)
 
         cmd = Twist()
         cmd.linear.x = v
@@ -210,9 +210,4 @@ class WallFollower(Node):
 def main():
     rclpy.init()
     node = WallFollower()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    rclpy.shutdown()
+    tr
