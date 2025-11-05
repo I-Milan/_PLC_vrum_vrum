@@ -12,7 +12,7 @@ teszt2_wall_follower:
     # PID tagok (szögsebességre)
     kp: 1.2
     ki: 0.1
-    kd: 0.
+    kd: 0.5
 
     # sebességek
     linear_speed: 0.5
