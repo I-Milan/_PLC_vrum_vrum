@@ -4,20 +4,20 @@ teszt2_wall_follower:
     side: "left"
 
     # kívánt távolság a faltól [m]
-    desired_distance: 1.2
+    desired_distance: 1.5
 
     # előrelátási távolság a geometriai (két pont) falszög becsléshez [m]
-    lookahead_distance: 0.5
+    lookahead_distance: 1.0
 
     # PID tagok (szögsebességre)
-    kp: 1.2
-    ki: 0.1
-    kd: 0.5
+    kp: 14.0
+    ki: 0.0
+    kd: 0.09
 
     # sebességek
-    linear_speed: 0.5
+    linear_speed: 0.6
     linear_speed_min: 0.15
-    angular_speed_limit: 1.8
+    angular_speed_limit: 4.8
 
     # óvatosság: ha előre kis szögben (±15°) közelebb van akadály, lassít/fordul
     slow_down_distance: 0.8
@@ -29,7 +29,20 @@ teszt2_wall_follower:
     valid_min: 0.03
 
     # melyik szögeket mintázzuk (fokban) – bal: 90° és 45°, jobb: -90° és -45°
-    angle_a_deg: 90.0
-    angle_b_deg: 45.0
+    angle_a_deg: 90.0   
+    angle_b_deg: 45.0   
     forward_half_fov_deg: 15.0
+
+    
+    follow_angle_deg: 45.0        # melyik szögből képezzük a "fal pontját"
+    lookahead_forward: 1.00       # ennyit toljuk előre a célpontot (m)
+    k_goal: 1.0                   # szög hiba -> kormány P erősítés
+    use_goalpoint: true           # ezt a módot használd a PID helyett
+
+    # oldalsó fal "eltűnés" detektálás és váltás
+    side_switch_enable: true
+    side_presence_sector_deg: 15.0   # 90° ± ennyiben nézzük a "van-e fal" átlagot
+    side_presence_max: 2.5           # ha az átlag > ez a távolság -> fal valószínűleg nincs
+    side_switch_hold_s: 1.0          # ennyi ideig nem váltunk vissza (hiszterézis)
+
     
