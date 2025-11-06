@@ -29,9 +29,10 @@ class WallFollower(Node):
     def __init__(self):
         super().__init__('teszt2_wall_follower')
 
-        # --- Params ---
+        # --- Alap paraméterek ---
         self.side = self.declare_parameter('side', 'left').get_parameter_value().string_value
         assert self.side in ('left', 'right'), 'side param must be "left" or "right"'
+        self.sign = 1.0 if self.side == 'left' else -1.0
 
         self.desired = float(self.declare_parameter('desired_distance', 0.6).value)
         self.L = float(self.declare_parameter('lookahead_distance', 0.5).value)
@@ -55,30 +56,54 @@ class WallFollower(Node):
         self.angle_b_deg = float(self.declare_parameter('angle_b_deg', 45.0).value)
         self.forward_half_fov_deg = float(self.declare_parameter('forward_half_fov_deg', 15.0).value)
 
-        self.sign = 1.0 if self.side == 'left' else -1.0
+        # LPF (fix) + Dinamikus LPF / reversal boost paramok
+        self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)  # régi, kompatibilitás
+        self.steer_alpha_min = float(self.declare_parameter('steer_alpha_min', 0.3).value)
+        self.steer_alpha_max = float(self.declare_parameter('steer_alpha_max', 0.95).value)
+        self.reversal_boost_factor = float(self.declare_parameter('reversal_boost_factor', 1.3).value)
+        self.reversal_bypass_time_s = float(self.declare_parameter('reversal_bypass_time_s', 0.25).value)
+
+        # 45°-os célpont mód (opcionális, a két-sugaras PID mellé/fölé)
+        self.follow_angle_deg = float(self.declare_parameter('follow_angle_deg', 45.0).value)
+        self.lookahead_forward = float(self.declare_parameter('lookahead_forward', 0.30).value)
+        self.k_goal = float(self.declare_parameter('k_goal', 1.2).value)
+        self.use_goalpoint = bool(self.declare_parameter('use_goalpoint', True).value)
+
+        # Oldal „eltűnés” detektálás és automatikus váltás
+        self.side_switch_enable = bool(self.declare_parameter('side_switch_enable', True).value)
+        self.side_presence_sector_deg = float(self.declare_parameter('side_presence_sector_deg', 15.0).value)
+        self.side_presence_max = float(self.declare_parameter('side_presence_max', 2.5).value)
+        self.side_switch_hold_s = float(self.declare_parameter('side_switch_hold_s', 1.0).value)
+
+        # Származtatott
         self.angle_a = math.radians(self.sign * self.angle_a_deg)
         self.angle_b = math.radians(self.sign * self.angle_b_deg)
 
-        self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)
-
+        # Állapotok
         self.int_err = 0.0
         self.prev_err = 0.0
         self.prev_t = None
         self._w_filt = 0.0
+        self._last_w = 0.0
+        self._reversal_until = 0.0
+        self.last_switch_t = 0.0
 
+        # QoS
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=5
         )
-
         self.scan_sub = self.create_subscription(LaserScan, 'scan', self.scan_cb, qos)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         self.med_err = MedianFilter(self.median_window)
 
-        self.get_logger().info(f'teszt2_wall_follower running. side={self.side}, desired={self.desired} m')
+        self.get_logger().info(
+            f'teszt2_wall_follower running. side={self.side}, desired={self.desired} m'
+        )
 
+    # --------- LiDAR segéd ---------
     def _angle_to_index(self, scan: LaserScan, angle_rad: float) -> int:
         inc = scan.angle_increment
         if inc == 0.0:
@@ -117,7 +142,14 @@ class WallFollower(Node):
                 mins = min(mins, min(r, self.range_clip_max))
         return mins
 
+    # --------- Geometria: két pont módszer ---------
     def _compute_error(self, scan: LaserScan):
+        """
+        a = 90° oldaltáv, b = 45° előre-oldal, beta = |a-b|
+        theta = atan2(a*cos(beta) - b, a*sin(beta))
+        d_t   = b*cos(theta) - L*sin(theta)
+        err   = desired - d_t
+        """
         beta = abs(self.angle_a - self.angle_b)
         a = self._get_range_at(scan, self.angle_a, half_window=1)
         b = self._get_range_at(scan, self.angle_b, half_window=1)
@@ -127,70 +159,198 @@ class WallFollower(Node):
 
         theta = math.atan2(a * math.cos(beta) - b, a * math.sin(beta))
         d_t = b * math.cos(theta) - self.L * math.sin(theta)
-
         err = self.desired - d_t
         return err, theta, a, b, d_t
 
+    # --------- Célpont 45° alapján (opcionális kormány) ---------
+    def _avg_range_in_sector(self, scan: LaserScan, center_angle: float, half_width_deg: float) -> float:
+        hw = math.radians(half_width_deg)
+        i0 = self._angle_to_index(scan, center_angle - hw)
+        i1 = self._angle_to_index(scan, center_angle + hw)
+        lo, hi = (min(i0, i1), max(i0, i1))
+        vals = []
+        for i in range(lo, hi + 1):
+            r = scan.ranges[i]
+            if math.isfinite(r) and r >= self.valid_min:
+                vals.append(min(r, self.range_clip_max))
+        return sum(vals) / len(vals) if vals else self.range_clip_max
+
+    def _goalpoint_from_45(self, scan: LaserScan):
+        """
+        45°-on mért pont -> célpont:
+          P = r [cos(a), sin(a)]
+          n = -P/|P|  (fal normálja a robot felé)
+          G = P + desired*n + [lookahead_forward, 0]
+        """
+        a = math.radians(self.sign * self.follow_angle_deg)
+        r = self._get_range_at(scan, a, half_window=1)
+        if not math.isfinite(r) or r >= self.range_clip_max:
+            return None
+        px, py = r * math.cos(a), r * math.sin(a)
+        norm = math.hypot(px, py)
+        if norm < 1e-6:
+            return None
+        nx, ny = -px / norm, -py / norm
+        gx = px + self.desired * nx + self.lookahead_forward
+        gy = py + self.desired * ny
+        return gx, gy
+
+    def _maybe_switch_side(self, scan: LaserScan, now_s: float):
+        """Ha az aktuális oldalon 'nincs fal' (90° környéke messze), és letelt a hold, válts oldalt."""
+        if not self.side_switch_enable:
+            return
+        side_center = math.radians(self.sign * 90.0)
+        d_avg = self._avg_range_in_sector(scan, side_center, self.side_presence_sector_deg)
+        if d_avg > self.side_presence_max and (now_s - self.last_switch_t) > self.side_switch_hold_s:
+            self.sign *= -1.0
+            self.side = 'left' if self.sign > 0 else 'right'
+            self.last_switch_t = now_s
+            # új szögek a másik oldalhoz
+            self.angle_a = math.radians(self.sign * self.angle_a_deg)
+            self.angle_b = math.radians(self.sign * self.angle_b_deg)
+            # PID reset
+            self.int_err = 0.0
+            self.prev_err = 0.0
+            self.get_logger().info(f'Fal eltűnt – oldalváltás: {self.side}')
+
+    # --------- Dinamikus LPF + reversal boost ---------
+    def _filter_and_clamp_w(self, w, now):
+        # reversal detektálás: előjelváltás nagy kéréssel
+        if (w * self._last_w) < 0.0 and abs(w) > 0.5 * self.w_lim:
+            self._reversal_until = now + self.reversal_bypass_time_s
+            w *= self.reversal_boost_factor
+
+        # dinamikus alpha: nagy |w| -> nagy alpha (kevesebb simítás)
+        if now < self._reversal_until:
+            alpha_dyn = self.steer_alpha_max
+        else:
+            ratio = clamp(abs(w) / max(self.w_lim, 1e-6), 0.0, 1.0)
+            alpha_dyn = self.steer_alpha_min + (self.steer_alpha_max - self.steer_alpha_min) * ratio
+
+        self._w_filt = (1.0 - alpha_dyn) * self._w_filt + alpha_dyn * w
+        w_out = clamp(self._w_filt, -self.w_lim, self.w_lim)
+        self._last_w = w_out
+        return w_out
+
+    # --------- Fő callback ---------
     def scan_cb(self, scan: LaserScan):
         now = self.get_clock().now().nanoseconds * 1e-9
         dt = 0.0 if self.prev_t is None else max(1e-3, now - self.prev_t)
         self.prev_t = now
 
+        # debug változók alapérték
+        theta = 0.0
+        a = float('nan')
+        b = float('nan')
+        d_t = float('nan')
+        err = 0.0
+
+        # esetleges oldalváltás
+        self._maybe_switch_side(scan, now)
+
+        # biztonság előre
         min_fwd = self._min_forward(scan)
 
-        err_raw, theta, a, b, d_t = self._compute_error(scan)
-        err = self.med_err.push(err_raw)
+        # célpont mód (ha engedélyezett és van érvényes célpont)
+        w_from_goal = None
+        if self.use_goalpoint:
+            gp = self._goalpoint_from_45(scan)
+            if gp is not None:
+                gx, gy = gp
+                ang_goal = math.atan2(gy, gx)
+                w_from_goal = self.k_goal * ang_goal
 
-        prev_err_prior = self.prev_err
-        self.int_err += err * dt
+        if w_from_goal is not None:
+            # --- Célpontos ág ---
+            w_raw = w_from_goal
 
-        i_max = 1.0
-        self.int_err = clamp(self.int_err, -i_max, i_max)
+            # sebesség menedzsment
+            v = self.v_lin
+            gamma = 2.0
+            turn_ratio = clamp(abs(w_raw) / max(self.w_lim, 1e-6), 0.0, 1.0)
+            turn_slowdown = max(0.1, 1.0 - (turn_ratio ** gamma))
+            v = max(self.v_lin_min, self.v_lin * turn_slowdown)
+            if turn_ratio > 0.85:
+                v = min(v, 0.05)
 
-        if err * prev_err_prior < 0.0 or min_fwd < self.slow_down_dist:
-            self.int_err = 0.0
+            if min_fwd < self.slow_down_dist:
+                v = max(self.v_lin_min, v * 0.35)
 
-        der = (err - prev_err_prior) / dt if dt > 0.0 else 0.0
-        self.prev_err = err
+            if min_fwd < self.stop_dist:
+                v = 0.0
+                w = (-self.sign) * 0.8 * self.w_lim
+                self._w_filt = w  # azonnali
+            else:
+                w = self._filter_and_clamp_w(w_raw, now)
 
-        w = self.kp * err + self.ki * self.int_err + self.kd * der
-        w = -self.sign * w
-
-        err_deadband = 0.02
-        if abs(err) < err_deadband:
-            w = 0.0
-            self.int_err *= 0.5
-
-        v = self.v_lin
-
-        turn_slowdown = max(0.2, 1.0 - (abs(w) / max(self.w_lim, 1e-6)))
-        v = max(self.v_lin_min, v * turn_slowdown)
-
-        if min_fwd < self.slow_down_dist:
-            v = max(self.v_lin_min, v * 0.35)
-
-        if min_fwd < self.stop_dist:
-            v = 0.0
-            w = (-self.sign) * 0.8 * self.w_lim
-            self._w_filt = w
         else:
-            alpha = clamp(self.steer_lpf_alpha, 0.0, 1.0)
-            self._w_filt = (1.0 - alpha) * self._w_filt + alpha * w
-            w = self._w_filt
-            w = clamp(w, -self.w_lim, self.w_lim)
+            # --- Két-sugaras PID ág ---
+            err_raw, theta, a, b, d_t = self._compute_error(scan)
+            err = self.med_err.push(err_raw)
 
+            prev_err_prior = self.prev_err
+
+            # integrál + bilincs
+            self.int_err += err * dt
+            self.int_err = clamp(self.int_err, -1.0, 1.0)
+
+            # előjel-váltásnál vagy közel akadálynál engedjük el
+            if err * prev_err_prior < 0.0 or min_fwd < self.slow_down_dist:
+                self.int_err = 0.0
+
+            der = (err - prev_err_prior) / dt if dt > 0.0 else 0.0
+            self.prev_err = err
+
+            w_raw = self.kp * err + self.ki * self.int_err + self.kd * der
+            w_raw = -self.sign * w_raw
+
+            # deadband
+            err_deadband = 0.02  # ~2 cm
+            if abs(err) < err_deadband:
+                w_raw = 0.0
+                self.int_err *= 0.5
+
+            # sebesség menedzsment
+            v = self.v_lin
+            gamma = 2.0
+            turn_ratio = clamp(abs(w_raw) / max(self.w_lim, 1e-6), 0.0, 1.0)
+            turn_slowdown = max(0.1, 1.0 - (turn_ratio ** gamma))
+            v = max(self.v_lin_min, self.v_lin * turn_slowdown)
+            if turn_ratio > 0.85:
+                v = min(v, 0.05)
+
+            if min_fwd < self.slow_down_dist:
+                v = max(self.v_lin_min, v * 0.35)
+
+            if min_fwd < self.stop_dist:
+                v = 0.0
+                w = (-self.sign) * 0.8 * self.w_lim
+                self._w_filt = w  # azonnali
+            else:
+                w = self._filter_and_clamp_w(w_raw, now)
+
+        # publikálás
         cmd = Twist()
         cmd.linear.x = v
         cmd.angular.z = w
         self.cmd_pub.publish(cmd)
 
-    def main():
-        rclpy.init()
-        node = WallFollower()
+        # debug
         try:
-            rclpy.spin(node)
-        except KeyboardInterrupt:
+            self.get_logger().debug(
+                f"side={self.side} err={err:.3f} theta={math.degrees(theta):.1f} "
+                f"a={a:.2f} b={b:.2f} d_t={d_t:.2f} min_fwd={min_fwd:.2f} v={v:.2f} w={w:.2f}"
+            )
+        except Exception:
             pass
-        node.destroy_node()
-        rclpy.shutdown()
 
+
+def main():
+    rclpy.init()
+    node = WallFollower()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
