@@ -7,6 +7,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
+from visualization_msgs.msg import Marker, MarkerArray
+from tf2_ros import Buffer, TransformListener
+from rclpy.time import Time
 
 
 def clamp(x, lo, hi):
@@ -29,7 +32,7 @@ class WallFollower(Node):
     def __init__(self):
         super().__init__('teszt2_wall_follower')
 
-        # --- Alap paraméterek (a te params.yaml-od alapján) ---
+        # --- Alap paraméterek (a te params.yaml szerint) ---
         self.side = self.declare_parameter('side', 'left').get_parameter_value().string_value
         assert self.side in ('left', 'right'), 'side param must be "left" or "right"'
         self.sign = 1.0 if self.side == 'left' else -1.0
@@ -56,7 +59,7 @@ class WallFollower(Node):
         self.angle_b_deg = float(self.declare_parameter('angle_b_deg', 45.0).value)
         self.forward_half_fov_deg = float(self.declare_parameter('forward_half_fov_deg', 15.0).value)
 
-        # LPF / reversal boost (megtartjuk, de nem piszkáljuk)
+        # LPF / boost
         self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)
         self.steer_alpha_min = float(self.declare_parameter('steer_alpha_min', 0.3).value)
         self.steer_alpha_max = float(self.declare_parameter('steer_alpha_max', 0.95).value)
@@ -75,19 +78,34 @@ class WallFollower(Node):
         self.side_presence_max = float(self.declare_parameter('side_presence_max', 2.5).value)
         self.side_switch_hold_s = float(self.declare_parameter('side_switch_hold_s', 1.0).value)
 
-        # Származtatott szögek az aktuális oldalhoz
-        self.angle_a = math.radians(self.sign * self.angle_a_deg)  # ~90°
-        self.angle_b = math.radians(self.sign * self.angle_b_deg)  # ~45°
+        # Szögek az aktuális oldalhoz
+        self.angle_a = math.radians(self.sign * self.angle_a_deg)  # 90°
+        self.angle_b = math.radians(self.sign * self.angle_b_deg)  # 45°
 
-        # Dinamikus cél (oldalváltáshoz) – induláskor a névleges desired
+        # Dinamikus cél (váltáshoz)
         self.desired_current = self.desired
-        self._desired_min = 0.5   # ésszerű bilincsek (nem paramozzuk túl)
+        self._desired_min = 0.5
         self._desired_max = 2.0
 
-        # Min-kanyar “mentőöv”
-        self._rescue_r45_ratio = 0.9      # 45° nagy, ha > 0.9 * side_presence_max
-        self._rescue_angle = 0.10         # rad (~5.7°) alatt kötelező fordulás
-        self._rescue_gain = 0.50          # w_lim 50%-a
+        # Min-kanyar segéd
+        self._rescue_r45_ratio = 0.9
+        self._rescue_angle = 0.10
+        self._rescue_gain = 0.50
+
+        # --- RViz vizualizáció (új) ---
+        self.viz_enable = bool(self.declare_parameter('viz_enable', True).value)
+        self.viz_frame = self.declare_parameter('viz_frame', 'base_link').get_parameter_value().string_value
+        self.viz_history_len = int(self.declare_parameter('viz_history_len', 200).value)
+        self.viz_point_size = float(self.declare_parameter('viz_point_size', 0.12).value)
+        self.viz_line_width = float(self.declare_parameter('viz_line_width', 0.03).value)
+        self.viz_lifetime = float(self.declare_parameter('viz_lifetime', 0.0).value)
+
+        self.goal_hist = deque(maxlen=self.viz_history_len)
+        self.viz_pub = self.create_publisher(MarkerArray, 'goal_viz', 1)
+
+        self.viz_base_frame = 'base_link'  # ebben számoljuk a goal pontot
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Állapotok
         self.int_err = 0.0
@@ -99,38 +117,28 @@ class WallFollower(Node):
         self.last_switch_t = 0.0
 
         # QoS
-        qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=5
-        )
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                         history=HistoryPolicy.KEEP_LAST, depth=5)
         self.scan_sub = self.create_subscription(LaserScan, 'scan', self.scan_cb, qos)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         self.med_err = MedianFilter(self.median_window)
-
         self.get_logger().info(
             f'teszt2_wall_follower running. side={self.side}, desired={self.desired} m'
         )
 
-    # --------- Szög illesztése a scan tartományába (KRITIKUS JAVÍTÁS!) ---------
+    # ---------- angle helper (wrap a scan tartományába) ----------
     def _wrap_angle_to_scan(self, angle_rad: float, scan: LaserScan) -> float:
-        """Visszaad egy olyan szöget, ami a [angle_min, angle_max] tartományba esik,
-        2π-s periodicitással. Így a -90° is helyesen a 270°-nak megfelelő indexre kerül,
-        ha a scan 0..2π tartományban van."""
         amin, amax = scan.angle_min, scan.angle_max
         width = amax - amin
         if width == 0.0:
             return amin
-        # normalizálás 0..width közé
         a = (angle_rad - amin) % (2.0 * math.pi)
-        # ha a szenzor tartománya kisebb/nagyobb, toljuk vissza a saját sávjába
         if a > width:
             a -= 2.0 * math.pi
         return amin + a
 
     def _angle_to_index(self, scan: LaserScan, angle_rad: float) -> int:
-        # <<< EZ AZ ÚJ: előbb wrap, aztán index >>>
         a_wrapped = self._wrap_angle_to_scan(angle_rad, scan)
         inc = scan.angle_increment
         if inc == 0.0:
@@ -138,7 +146,7 @@ class WallFollower(Node):
         idx = int(round((a_wrapped - scan.angle_min) / inc))
         return clamp(idx, 0, len(scan.ranges) - 1)
 
-    # --------- LiDAR segéd ---------
+    # ---------- LiDAR segéd ----------
     def _get_range_at(self, scan: LaserScan, angle_rad: float, half_window: int = 1) -> float:
         i_center = self._angle_to_index(scan, angle_rad)
         lo = clamp(i_center - half_window, 0, len(scan.ranges) - 1)
@@ -179,7 +187,7 @@ class WallFollower(Node):
                 mins = min(mins, min(r, self.range_clip_max))
         return mins
 
-    # --------- Geometria: két pont módszer (backup) ---------
+    # ---------- Geometria (backup PID-hez) ----------
     def _compute_error(self, scan: LaserScan):
         beta = abs(self.angle_a - self.angle_b)
         a = self._get_range_at(scan, self.angle_a, half_window=1)
@@ -190,11 +198,10 @@ class WallFollower(Node):
 
         theta = math.atan2(a * math.cos(beta) - b, a * math.sin(beta))
         d_t = b * math.cos(theta) - self.L * math.sin(theta)
-
         err = self.desired - d_t
         return err, theta, a, b, d_t
 
-    # --------- Goalpoint 45° alapján ---------
+    # ---------- Goalpoint 45° alapján ----------
     def _goalpoint_from_45(self, scan: LaserScan):
         a = math.radians(self.sign * self.follow_angle_deg)
         r = self._get_range_at(scan, a, half_window=1)
@@ -209,14 +216,13 @@ class WallFollower(Node):
         gy = py + self.desired_current * ny
         return gx, gy
 
-    # --------- Oldalváltás + dinamikus cél beállítás ---------
+    # ---------- Oldalváltás + dinamikus cél ----------
     def _maybe_switch_side(self, scan: LaserScan, now_s: float):
         if not self.side_switch_enable:
             return
         side_center = math.radians(self.sign * 90.0)
         d_avg = self._avg_range_in_sector(scan, side_center, self.side_presence_sector_deg)
 
-        # Kiegészítés: 45° is számítson "fal-eltűnésnek"
         r45 = self._get_range_at(scan, math.radians(self.sign * 45.0), 1)
         if not math.isfinite(r45):
             r45 = self.range_clip_max
@@ -237,7 +243,7 @@ class WallFollower(Node):
             self.int_err = 0.0
             self.prev_err = 0.0
 
-            # Dinamikus cél: új oldal 90°-ából (ésszerű bilincs)
+            # dinamikus cél beállítás (új oldal 90°-a)
             d_new = self._avg_range_in_sector(scan, math.radians(self.sign * 90.0), self.side_presence_sector_deg)
             if not math.isfinite(d_new):
                 d_new = self.desired
@@ -247,7 +253,93 @@ class WallFollower(Node):
                 f'[SWITCH] {old_side} -> {self.side}; d90={d_avg:.2f} r45={r45:.2f} desired_cur={self.desired_current:.2f}'
             )
 
-    # --------- Dinamikus LPF + reversal boost ---------
+    # ---------- RViz publikálás ----------
+    def _publish_goal_markers(self, gx, gy, now_s: float):
+        p = self._to_viz_frame(gx, gy)
+        if p is None:
+            return
+        gx, gy = p
+        
+        if not self.viz_enable  :
+            return
+
+        # add a history-hoz
+        self.goal_hist.append((gx, gy))
+
+        ma = MarkerArray()
+
+        # 0: current goal (green sphere)
+        m_goal = Marker()
+        m_goal.header.frame_id = self.viz_frame
+        m_goal.header.stamp = Time().to_msg()  # 0
+        m_goal.ns = "teszt2_goal"
+        m_goal.id = 0
+        m_goal.type = Marker.SPHERE
+        m_goal.action = Marker.ADD
+        m_goal.pose.position.x = float(gx)
+        m_goal.pose.position.y = float(gy)
+        m_goal.pose.position.z = 0.0
+        m_goal.pose.orientation.w = 1.0
+        m_goal.scale.x = self.viz_point_size
+        m_goal.scale.y = self.viz_point_size
+        m_goal.scale.z = self.viz_point_size
+        m_goal.color.a = 1.0
+        m_goal.color.r = 0.1
+        m_goal.color.g = 0.95
+        m_goal.color.b = 0.2
+        m_goal.lifetime.sec = int(self.viz_lifetime)
+        ma.markers.append(m_goal)
+
+        # 1: history as line strip
+        m_line = Marker()
+        m_line.header.frame_id = self.viz_frame
+        m_line.header.stamp = m_goal.header.stamp
+        m_line.ns = "teszt2_goal"
+        m_line.id = 1
+        m_line.type = Marker.LINE_STRIP
+        m_line.action = Marker.ADD
+        m_line.scale.x = self.viz_line_width
+        m_line.color.a = 0.9
+        m_line.color.r = 0.2
+        m_line.color.g = 0.6
+        m_line.color.b = 1.0
+        m_line.lifetime.sec = int(self.viz_lifetime)
+
+        from geometry_msgs.msg import Point
+        for (x, y) in self.goal_hist:
+            p = Point()
+            p.x, p.y, p.z = float(x), float(y), 0.0
+            m_line.points.append(p)
+        ma.markers.append(m_line)
+
+        self.viz_pub.publish(ma)
+
+    def _to_viz_frame(self, x, y):
+        # ha ugyanaz a keret, nem kell transzform
+        if self.viz_frame == self.viz_base_frame:
+            return x, y
+        try:
+            t = self.tf_buffer.lookup_transform(
+                self.viz_frame,          # cél keret (pl. odom_combined)
+                self.viz_base_frame,     # forrás (base_link)
+                Time())                  # 0-időbélyeg -> legfrissebb TF
+            tx = t.transform.translation.x
+            ty = t.transform.translation.y
+            q = t.transform.rotation
+            # yaw a kvaternióból
+            siny_cosp = 2*(q.w*q.z + q.x*q.y)
+            cosy_cosp = 1 - 2*(q.y*q.y + q.z*q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            cy = math.cos(yaw); sy = math.sin(yaw)
+            # 2D rot+transz
+            X = tx +  cy*x - sy*y
+            Y = ty +  sy*x + cy*y
+            return X, Y
+        except Exception:
+            return None  # ha nincs TF, inkább ne publikáljunk hibás pontot
+
+
+    # ---------- Dinamikus LPF ----------
     def _filter_and_clamp_w(self, w, now):
         if (w * self._last_w) < 0.0 and abs(w) > 0.5 * self.w_lim:
             self._reversal_until = now + self.reversal_bypass_time_s
@@ -264,27 +356,23 @@ class WallFollower(Node):
         self._last_w = w_out
         return w_out
 
-    # --------- Fő callback ---------
+    # ---------- fő callback ----------
     def scan_cb(self, scan: LaserScan):
         now = self.get_clock().now().nanoseconds * 1e-9
         dt = 0.0 if self.prev_t is None else max(1e-3, now - self.prev_t)
         self.prev_t = now
 
-        # debug változók
         theta = 0.0
         a = float('nan')
         b = float('nan')
         d_t = float('nan')
         err = 0.0
 
-        # oldalváltás (ha kell)
         self._maybe_switch_side(scan, now)
-
-        # előre biztonság
         min_fwd = self._min_forward(scan)
 
-        # goalpoint
         w_from_goal = None
+        gp = None
         if self.use_goalpoint:
             gp = self._goalpoint_from_45(scan)
             if gp is not None:
@@ -292,7 +380,7 @@ class WallFollower(Node):
                 ang_goal = math.atan2(gy, gx)
                 w_from_goal = self.k_goal * ang_goal
 
-                # Min-kanyar mentőöv
+                # min-kanyar mentőöv
                 r45_now = self._get_range_at(scan, math.radians(self.sign * 45.0), 1)
                 if not math.isfinite(r45_now):
                     r45_now = self.range_clip_max
@@ -300,14 +388,11 @@ class WallFollower(Node):
                     w_from_goal = self.sign * self._rescue_gain * self.w_lim
 
         if w_from_goal is not None:
-            # célpontos ág
             w_raw = w_from_goal
-
             v = self.v_lin
             gamma = 2.0
             turn_ratio = clamp(abs(w_raw) / max(self.w_lim, 1e-6), 0.0, 1.0)
-            turn_slowdown = max(0.1, 1.0 - (turn_ratio ** gamma))
-            v = max(self.v_lin_min, self.v_lin * turn_slowdown)
+            v = max(self.v_lin_min, self.v_lin * max(0.1, 1.0 - (turn_ratio ** gamma)))
             if min_fwd < self.slow_down_dist:
                 v = max(self.v_lin_min, v * 0.35)
             if min_fwd < self.stop_dist:
@@ -316,12 +401,10 @@ class WallFollower(Node):
                 self._w_filt = w
             else:
                 w = self._filter_and_clamp_w(w_raw, now)
-
         else:
-            # backup: két-sugaras PID
+            # backup PID (ha nincs értelmes goalpoint)
             err_raw, theta, a, b, d_t = self._compute_error(scan)
             err = self.med_err.push(err_raw)
-
             prev_err_prior = self.prev_err
             self.int_err += err * dt
             self.int_err = clamp(self.int_err, -1.0, 1.0)
@@ -329,15 +412,12 @@ class WallFollower(Node):
                 self.int_err = 0.0
             der = (err - prev_err_prior) / dt if dt > 0.0 else 0.0
             self.prev_err = err
-
             w_raw = self.kp * err + self.ki * self.int_err + self.kd * der
             w_raw = -self.sign * w_raw
-
             v = self.v_lin
             gamma = 2.0
             turn_ratio = clamp(abs(w_raw) / max(self.w_lim, 1e-6), 0.0, 1.0)
-            turn_slowdown = max(0.1, 1.0 - (turn_ratio ** gamma))
-            v = max(self.v_lin_min, self.v_lin * turn_slowdown)
+            v = max(self.v_lin_min, self.v_lin * max(0.1, 1.0 - (turn_ratio ** gamma)))
             if min_fwd < self.slow_down_dist:
                 v = max(self.v_lin_min, v * 0.35)
             if min_fwd < self.stop_dist:
@@ -347,20 +427,16 @@ class WallFollower(Node):
             else:
                 w = self._filter_and_clamp_w(w_raw, now)
 
-        # publikálás
+        # parancs
         cmd = Twist()
         cmd.linear.x = v
         cmd.angular.z = w
         self.cmd_pub.publish(cmd)
 
-        # debug (opcionális)
-        try:
-            self.get_logger().debug(
-                f"side={self.side} err={err:.3f} theta={math.degrees(theta):.1f} "
-                f"a={a:.2f} b={b:.2f} d_t={d_t:.2f} v={v:.2f} w={w:.2f} desired_cur={self.desired_current:.2f}"
-            )
-        except Exception:
-            pass
+        # RViz marker (ha van friss goalpoint)
+        if gp is not None:
+            gx, gy = gp
+            self._publish_goal_markers(gx, gy, now)
 
 
 def main():
