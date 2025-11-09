@@ -32,7 +32,7 @@ class WallFollower(Node):
     def __init__(self):
         super().__init__('teszt2_wall_follower')
 
-        # --- Alap paraméterek (a te params.yaml szerint) ---
+        # --- Alap paraméterek ---
         self.side = self.declare_parameter('side', 'left').get_parameter_value().string_value
         assert self.side in ('left', 'right'), 'side param must be "left" or "right"'
         self.sign = 1.0 if self.side == 'left' else -1.0
