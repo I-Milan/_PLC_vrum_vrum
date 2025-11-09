@@ -1,7 +1,7 @@
 teszt2_wall_follower:
   ros__parameters:
     # melyik oldali falat kövessük: "left" vagy "right"
-    side: "right"
+    side: "left"
 
     # kívánt távolság a faltól [m]
     desired_distance: 1.3
@@ -45,4 +45,9 @@ teszt2_wall_follower:
     side_presence_max: 2.5           # ha az átlag > ez a távolság -> fal valószínűleg nincs
     side_switch_hold_s: 0.2        # ennyi ideig nem váltunk vissza (hiszterézis)
 
-    
+    viz_enable: true
+    viz_frame: "base_link"
+    viz_history_len: 200
+    viz_point_size: 0.12     # gömb átmérő
+    viz_line_width: 0.03     # vonal vastagság (m)
+    viz_lifetime: 0.0        # 0.0 = nem tűnik el
