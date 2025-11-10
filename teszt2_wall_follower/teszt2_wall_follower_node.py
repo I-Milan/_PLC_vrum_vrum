@@ -72,11 +72,25 @@ class WallFollower(Node):
         self.k_goal = float(self.declare_parameter('k_goal', 1.0).value)
         self.use_goalpoint = bool(self.declare_parameter('use_goalpoint', True).value)
 
-        # Oldalváltás
-        self.side_switch_enable = bool(self.declare_parameter('side_switch_enable', True).value)
+        # Oldalváltás – RÉGI (90°) logika opcionális
+        self.presence_switch_enable = bool(self.declare_parameter('presence_switch_enable', False).value)
         self.side_presence_sector_deg = float(self.declare_parameter('side_presence_sector_deg', 15.0).value)
         self.side_presence_max = float(self.declare_parameter('side_presence_max', 2.5).value)
+
+        # Oldalváltás – ÚJ: goalpoint-ugrás alapján
+        self.gp_jump_enable = bool(self.declare_parameter('gp_jump_enable', True).value)
+        self.gp_jump_thresh = float(self.declare_parameter('gp_jump_thresh', 1.8).value)   # m
+        self.gp_jump_frames = int(self.declare_parameter('gp_jump_frames', 2).value)       # egymás utáni frame-ek
+
         self.side_switch_hold_s = float(self.declare_parameter('side_switch_hold_s', 1.0).value)
+
+        # Saroktartalék oldalváltás után
+        self.post_switch_expand_s = float(self.declare_parameter('post_switch_expand_s', 5.0).value)
+        self.post_switch_expand_add = float(self.declare_parameter('post_switch_expand_add', 0.30).value)
+        self._expand_until = 0.0
+
+        # Desired visszacsengés (visszahúzás a végső desired felé)
+        self.desired_relax_tau_s = float(self.declare_parameter('desired_relax_tau_s', 2.0).value)
 
         # Szögek az aktuális oldalhoz
         self.angle_a = math.radians(self.sign * self.angle_a_deg)  # 90°
@@ -92,7 +106,7 @@ class WallFollower(Node):
         self._rescue_angle = 0.10
         self._rescue_gain = 0.50
 
-        # --- RViz vizualizáció (új) ---
+        # --- RViz vizualizáció ---
         self.viz_enable = bool(self.declare_parameter('viz_enable', True).value)
         self.viz_frame = self.declare_parameter('viz_frame', 'base_link').get_parameter_value().string_value
         self.viz_history_len = int(self.declare_parameter('viz_history_len', 200).value)
@@ -103,8 +117,9 @@ class WallFollower(Node):
         self.goal_hist = deque(maxlen=self.viz_history_len)
         self.viz_pub = self.create_publisher(MarkerArray, 'goal_viz', 1)
 
-        self.viz_base_frame = 'base_link'  # ebben számoljuk a goal pontot
+        self.viz_base_frame = 'base_link'
         self.tf_buffer = Buffer()
+               # noqa: E702
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Állapotok
@@ -115,6 +130,10 @@ class WallFollower(Node):
         self._last_w = 0.0
         self._reversal_until = 0.0
         self.last_switch_t = 0.0
+
+        # goal jump detektálás állapot
+        self._last_goal = None
+        self._gp_jump_count = 0
 
         # QoS
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -127,7 +146,7 @@ class WallFollower(Node):
             f'teszt2_wall_follower running. side={self.side}, desired={self.desired} m'
         )
 
-    # ---------- angle helper (wrap a scan tartományába) ----------
+    # ---------- angle helper ----------
     def _wrap_angle_to_scan(self, angle_rad: float, scan: LaserScan) -> float:
         amin, amax = scan.angle_min, scan.angle_max
         width = amax - amin
@@ -201,8 +220,8 @@ class WallFollower(Node):
         err = self.desired - d_t
         return err, theta, a, b, d_t
 
-    # ---------- Goalpoint 45° alapján ----------
-    def _goalpoint_from_45(self, scan: LaserScan):
+    # ---------- Goalpoint 45° alapján + SAROKTARTALÉK ----------
+    def _goalpoint_from_45(self, scan: LaserScan, now_s: float):
         a = math.radians(self.sign * self.follow_angle_deg)
         r = self._get_range_at(scan, a, half_window=1)
         if not math.isfinite(r) or r >= self.range_clip_max:
@@ -212,46 +231,62 @@ class WallFollower(Node):
         if norm < 1e-6:
             return None
         nx, ny = -px / norm, -py / norm
-        gx = px + self.desired_current * nx + self.lookahead_forward
-        gy = py + self.desired_current * ny
+
+        # Saroktartalék ideje alatt ideiglenesen nagyobb “desired”
+        extra = self.post_switch_expand_add if (now_s < self._expand_until) else 0.0
+        desired_eff = self.desired_current + extra
+
+        gx = px + desired_eff * nx + self.lookahead_forward
+        gy = py + desired_eff * ny
         return gx, gy
 
-    # ---------- Oldalváltás + dinamikus cél ----------
-    def _maybe_switch_side(self, scan: LaserScan, now_s: float):
-        if not self.side_switch_enable:
+    # ---------- BELSŐ: oldalváltás végrehajtása ----------
+    def _do_switch(self, now_s: float, scan: LaserScan, reason: str):
+        old_side = self.side
+        self.sign *= -1.0
+        self.side = 'left' if self.sign > 0 else 'right'
+        self.last_switch_t = now_s
+
+        # új szögek az új oldalhoz
+        self.angle_a = math.radians(self.sign * self.angle_a_deg)
+        self.angle_b = math.radians(self.sign * self.angle_b_deg)
+
+        # PID reset
+        self.int_err = 0.0
+        self.prev_err = 0.0
+        self._w_filt = 0.0
+        self._last_w = 0.0
+
+        # dinamikus cél beállítás (új oldal 90°-a) – de SOHA ne legyen kisebb a desired-nél
+        d_new = self._avg_range_in_sector(scan, math.radians(self.sign * 90.0), self.side_presence_sector_deg)
+        if not math.isfinite(d_new):
+            d_new = self.desired
+        self.desired_current = clamp(max(self.desired, d_new), self._desired_min, self._desired_max)
+
+        # SAROKTARTALÉK aktiválása
+        self._expand_until = now_s + self.post_switch_expand_s
+
+        # jump detektor reset
+        self._last_goal = None
+        self._gp_jump_count = 0
+
+        self.get_logger().info(
+            f'[SWITCH] {old_side} -> {self.side}; reason={reason}; '
+            f'desired_cur={self.desired_current:.2f}; expand {self.post_switch_expand_add:.2f}m/{self.post_switch_expand_s:.1f}s'
+        )
+
+    # ---------- Oldalváltás (régi – 90° jelenlét alapján) ----------
+    def _maybe_switch_side_presence(self, scan: LaserScan, now_s: float):
+        if not self.presence_switch_enable:
             return
         side_center = math.radians(self.sign * 90.0)
         d_avg = self._avg_range_in_sector(scan, side_center, self.side_presence_sector_deg)
-
         r45 = self._get_range_at(scan, math.radians(self.sign * 45.0), 1)
         if not math.isfinite(r45):
             r45 = self.range_clip_max
-
         need_switch = (d_avg > self.side_presence_max) or (r45 > 0.9 * self.side_presence_max)
-
         if need_switch and (now_s - self.last_switch_t) > self.side_switch_hold_s:
-            old_side = self.side
-            self.sign *= -1.0
-            self.side = 'left' if self.sign > 0 else 'right'
-            self.last_switch_t = now_s
-
-            # új szögek az új oldalhoz
-            self.angle_a = math.radians(self.sign * self.angle_a_deg)
-            self.angle_b = math.radians(self.sign * self.angle_b_deg)
-
-            # PID reset
-            self.int_err = 0.0
-            self.prev_err = 0.0
-
-            # dinamikus cél beállítás (új oldal 90°-a)
-            d_new = self._avg_range_in_sector(scan, math.radians(self.sign * 90.0), self.side_presence_sector_deg)
-            if not math.isfinite(d_new):
-                d_new = self.desired
-            self.desired_current = clamp(d_new, self._desired_min, self._desired_max)
-
-            self.get_logger().info(
-                f'[SWITCH] {old_side} -> {self.side}; d90={d_avg:.2f} r45={r45:.2f} desired_cur={self.desired_current:.2f}'
-            )
+            self._do_switch(now_s, scan, reason=f'presence d90={d_avg:.2f} r45={r45:.2f}')
 
     # ---------- RViz publikálás ----------
     def _publish_goal_markers(self, gx, gy, now_s: float):
@@ -259,19 +294,16 @@ class WallFollower(Node):
         if p is None:
             return
         gx, gy = p
-        
-        if not self.viz_enable  :
+        if not self.viz_enable:
             return
 
-        # add a history-hoz
         self.goal_hist.append((gx, gy))
 
         ma = MarkerArray()
 
-        # 0: current goal (green sphere)
         m_goal = Marker()
         m_goal.header.frame_id = self.viz_frame
-        m_goal.header.stamp = Time().to_msg()  # 0
+        m_goal.header.stamp = Time().to_msg()
         m_goal.ns = "teszt2_goal"
         m_goal.id = 0
         m_goal.type = Marker.SPHERE
@@ -290,7 +322,6 @@ class WallFollower(Node):
         m_goal.lifetime.sec = int(self.viz_lifetime)
         ma.markers.append(m_goal)
 
-        # 1: history as line strip
         m_line = Marker()
         m_line.header.frame_id = self.viz_frame
         m_line.header.stamp = m_goal.header.stamp
@@ -307,37 +338,29 @@ class WallFollower(Node):
 
         from geometry_msgs.msg import Point
         for (x, y) in self.goal_hist:
-            p = Point()
-            p.x, p.y, p.z = float(x), float(y), 0.0
+            p = Point(); p.x, p.y, p.z = float(x), float(y), 0.0
             m_line.points.append(p)
         ma.markers.append(m_line)
 
         self.viz_pub.publish(ma)
 
     def _to_viz_frame(self, x, y):
-        # ha ugyanaz a keret, nem kell transzform
         if self.viz_frame == self.viz_base_frame:
             return x, y
         try:
-            t = self.tf_buffer.lookup_transform(
-                self.viz_frame,          # cél keret (pl. odom_combined)
-                self.viz_base_frame,     # forrás (base_link)
-                Time())                  # 0-időbélyeg -> legfrissebb TF
+            t = self.tf_buffer.lookup_transform(self.viz_frame, self.viz_base_frame, Time())
             tx = t.transform.translation.x
             ty = t.transform.translation.y
             q = t.transform.rotation
-            # yaw a kvaternióból
             siny_cosp = 2*(q.w*q.z + q.x*q.y)
             cosy_cosp = 1 - 2*(q.y*q.y + q.z*q.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
             cy = math.cos(yaw); sy = math.sin(yaw)
-            # 2D rot+transz
             X = tx +  cy*x - sy*y
             Y = ty +  sy*x + cy*y
             return X, Y
         except Exception:
-            return None  # ha nincs TF, inkább ne publikáljunk hibás pontot
-
+            return None
 
     # ---------- Dinamikus LPF ----------
     def _filter_and_clamp_w(self, w, now):
@@ -368,14 +391,45 @@ class WallFollower(Node):
         d_t = float('nan')
         err = 0.0
 
-        self._maybe_switch_side(scan, now)
+        # opcionális régi (90°) váltás
+        self._maybe_switch_side_presence(scan, now)
+
         min_fwd = self._min_forward(scan)
+
+        # --- desired_current fokozatos visszahúzás a végső desired felé ---
+        if self.desired_relax_tau_s > 1e-3:
+            # exp. simítás: y += alpha*(target - y), alpha ~ dt/tau (pontosabban 1-exp(-dt/tau))
+            alpha = 1.0 - math.exp(-dt / self.desired_relax_tau_s)
+            self.desired_current += alpha * (self.desired - self.desired_current)
+            self.desired_current = clamp(self.desired_current, self._desired_min, self._desired_max)
 
         w_from_goal = None
         gp = None
+        gp_raw = None
+
         if self.use_goalpoint:
-            gp = self._goalpoint_from_45(scan)
-            if gp is not None:
+            gp_raw = self._goalpoint_from_45(scan, now)
+
+            # --- goal jump alapú oldalváltás ---
+            if self.gp_jump_enable and gp_raw is not None:
+                if self._last_goal is not None:
+                    dx = gp_raw[0] - self._last_goal[0]
+                    dy = gp_raw[1] - self._last_goal[1]
+                    jump = math.hypot(dx, dy)
+                    if jump > self.gp_jump_thresh:
+                        self._gp_jump_count += 1
+                    else:
+                        self._gp_jump_count = 0
+
+                    if (self._gp_jump_count >= self.gp_jump_frames and
+                        (now - self.last_switch_t) > self.side_switch_hold_s):
+                        self._do_switch(now, scan, reason=f'goal_jump {jump:.2f} m')
+                        gp_raw = self._goalpoint_from_45(scan, now)
+                        self._gp_jump_count = 0
+                self._last_goal = gp_raw
+
+            if gp_raw is not None:
+                gp = gp_raw
                 gx, gy = gp
                 ang_goal = math.atan2(gy, gx)
                 w_from_goal = self.k_goal * ang_goal
@@ -434,8 +488,8 @@ class WallFollower(Node):
         self.cmd_pub.publish(cmd)
 
         # RViz marker (ha van friss goalpoint)
-        if gp is not None:
-            gx, gy = gp
+        if gp_raw is not None:
+            gx, gy = gp_raw
             self._publish_goal_markers(gx, gy, now)
 
 
