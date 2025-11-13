@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'teszt2_wall_follower_node = teszt2_wall_follower.teszt2_wall_follower_node:main',
+            'polyline_builder_node = teszt2_wall_follower.polyline_builder_node:main',
         ],
     },
 )
