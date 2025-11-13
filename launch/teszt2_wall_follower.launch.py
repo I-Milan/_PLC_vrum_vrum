@@ -22,10 +22,23 @@ def generate_launch_description():
         ),
 
         Node(
-            package='teszt2_wall_follower',
-            executable='teszt2_wall_follower_node',
-            name='teszt2_wall_follower',
-            output='screen',
-            parameters=[params_file]  # <-- nincs trükközés, simán átadjuk a fájlt
+            package="teszt2_wall_follower",
+            executable="polyline_builder_node",
+            name="polyline_builder",
+            parameters=[
+            LaunchConfiguration('params_file'),
+            {"frame_id": "base_link"},
+            {"use_sim_time": True},       
+            ],
+            
+        ),
+
+        Node(
+            package="teszt2_wall_follower",
+            executable="teszt2_wall_follower_node",
+            name="teszt2_wall_follower",
+            parameters=[LaunchConfiguration('params_file'),
+            {"use_sim_time": True},
+            ],
         ),
     ])
