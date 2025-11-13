@@ -1,69 +1,64 @@
 teszt2_wall_follower:
   ros__parameters:
-    # melyik oldali falat kövessük: "left" vagy "right"
     side: "left"
 
-    # kívánt távolság a faltól [m]
-    desired_distance: 1.5
+    desired_distance: 1.5    # Cél távolság a követett faltól (m).
+    lookahead_distance: 1.0   # A két-sugaras (backup PID) geometria előretekintési hossza.
 
-    # előrelátási távolság a geometriai (két pont) falszög becsléshez [m]
-    lookahead_distance: 1.4
-
-    # PID tagok (szögsebességre)
     kp: 14.0
     ki: 0.0
     kd: 0.09
 
-    # sebességek
     linear_speed: 0.4
     linear_speed_min: 0.3
-    angular_speed_limit: 5.5
+    angular_speed_limit: 4.8  # Max. szögsebesség (|w|) rad/s – kormányzás korlátja.
 
-    # óvatosság: ha előre kis szögben (±15°) közelebb van akadály, lassít/fordul
     slow_down_distance: 0.8
-    stop_distance: 0.30
+    stop_distance: 0.35
 
-    # szűrés és numerika
-    median_window: 5
-    range_clip_max: 10.0     # ha inf, ide klippeljük
-    valid_min: 0.03
+    median_window: 5          # Medián szűrő ablakméret a backup PID hibájára.
+    range_clip_max: 10.0      # Max. távolság, amire a LIDAR méréseket „levágjuk”.
+    valid_min: 0.03            # Minimális érvényes LIDAR távolság (m). Ez alatti mérések kuka.
 
-    # melyik szögeket mintázzuk (fokban) – bal: 90° és 45°, jobb: -90° és -45°
-    angle_a_deg: 90.0   
-    angle_b_deg: 45.0   
+    angle_a_deg: 90.0         # Oldalsó sugár szöge a backup PID-nél.
+    angle_b_deg: 45.0          # Előre-oldal sugár szöge a backup PID-nél.
     forward_half_fov_deg: 15.0
-    
-    # Kormány szűrés/boost (benne van a kódban, de fix LPF-et használunk)
-    steer_lpf_alpha: 0.5
-    steer_alpha_min: 0.3
-    steer_alpha_max: 0.95
-    reversal_boost_factor: 1.3
-    reversal_bypass_time_s: 0.25
 
-    post_switch_expand_s: 4.0       # váltás után ennyi másodpercig
-    post_switch_expand_delta: 0.30  # ennyivel NÖVELJÜK a kívánt távolságot
-    desired_relax_tau_s: 2.0        # időállandó [s] (nagyobb = lassabb visszaállás)
-    
-    follow_angle_deg: 40.0        # melyik szögből képezzük a "fal pontját"
-    lookahead_forward: 1.200       # ennyit toljuk előre a célpontot (m)
-    k_goal: 0.5                 # szög hiba -> kormány P erősítés
-    use_goalpoint: true           # ezt a módot használd a PID helyett
+    follow_angle_deg: 45.0      # A goalpoint követő sugár szöge (a falhoz képest).
+                              # kisebb (pl. 35°): inkább előre néz, ha nagyob, akkor inkább oldalr afigyel
+    lookahead_forward: 1.00   # A goalpont előrehozása tangens irányban (m).
+    k_goal: 1.0               # A goalpont-szögből számolt w skálafaktora.
+                              # kisebb: lustábban fordul a goal felé, nagyobb: agresszívebben mozdul a goal irányába,
+    use_goalpoint: true
 
-    # OLDALVÁLTÁS – ÚJ: goalpoint "ugrás" alapján
+    # ÚJ – Polyline forrás bekapcsolása:
+    use_polyline: true
+    polyline_left_topic:  "/polyline_left"
+    polyline_right_topic: "/polyline_right"
+    polyline_frame: "base_link"
+    min_poly_points: 6          # Minimum pontszám, hogy egy polyline „érvényesnek” számítson.
+    max_goal_jump: 2.0          # Ha a goalpont két frame között ennél nagyobbat ugrik (m), akkor az előző goal-t preferáljuk.
+
+    # Goal-jump alapú oldalváltás (ha kell)
     gp_jump_enable: true
-    gp_jump_thresh: 1.2           # ha a következő goal > 1.8 m-rel odébb van
-    gp_jump_frames: 1             # ennyi egymás utáni frame-ben
-    side_switch_hold_s: 0.10      # váltások közti hiszterézis
-    
-    # oldalsó fal "eltűnés" detektálás és váltás
-    side_switch_enable: false
-    side_presence_sector_deg: 15.0   # 90° ± ennyiben nézzük a "van-e fal" átlagot
-    side_presence_max: 2.5           # ha az átlag > ez a távolság -> fal valószínűleg nincs
-    side_switch_hold_s: 0.2        # ennyi ideig nem váltunk vissza (hiszterézis)
+    gp_jump_thresh: 0.5         # Ennél nagyobb goal-ugrásnál (m) oldalváltás.
+    gp_jump_frames: 1           # Hány egymást követő frame-ben kell a nagy ugrásnak jelentkeznie.
+    side_switch_hold_s: 0.0
 
+
+
+polyline_builder:
+  ros__parameters:
+    frame_id: "base_link"
+
+    # LIDAR szűrés
+    valid_min: 0.05           # Minimális érvényes LIDAR távolság (m).
+    range_clip_max: 5.0       # Maximum távolság, ameddig a LIDAR pontokat figyelembe vesszük.
+
+    front_cut_deg: 15.0        # mekkora szöget vágjunk ki elöl (mindkét oldalon)
+    keep_radius_delta: 0.8     # mennyivel lehet messzebb a "közeli faltól"
+
+    max_seg_len: 0.3            # Két szomszédos pont közti max. engedett távolság a polyline-ban.
+    max_angle_step_deg: 4.0      # Két szomszédos pont közti max. szög-lépés (radiánban számolunk belőle).
     viz_enable: true
-    viz_frame: "base_link"
-    viz_history_len: 200
-    viz_point_size: 0.12     # gömb átmérő
-    viz_line_width: 0.03     # vonal vastagság (m)
-    viz_lifetime: 0.0        # 0.0 = nem tűnik el
+    viz_lifetime: 0.0
