@@ -13,8 +13,8 @@ teszt2_wall_follower:
     linear_speed_min: 0.3
     angular_speed_limit: 4.8  # Max. szögsebesség (|w|) rad/s – kormányzás korlátja.
 
-    slow_down_distance: 0.8
-    stop_distance: 0.35
+    slow_down_distance: 0.25
+    stop_distance: 0.18
 
     median_window: 5          # Medián szűrő ablakméret a backup PID hibájára.
     range_clip_max: 10.0      # Max. távolság, amire a LIDAR méréseket „levágjuk”.
@@ -26,7 +26,7 @@ teszt2_wall_follower:
 
     follow_angle_deg: 55.0      # A goalpoint követő sugár szöge (a falhoz képest).
                               # kisebb (pl. 35°): inkább előre néz, ha nagyob, akkor inkább oldalr afigyel
-    lookahead_forward: 1.00   # A goalpont előrehozása tangens irányban (m).
+    lookahead_forward: 0.500   # A goalpont előrehozása tangens irányban (m).
     k_goal: 1.0               # A goalpont-szögből számolt w skálafaktora.
                               # kisebb: lustábban fordul a goal felé, nagyobb: agresszívebben mozdul a goal irányába,
     use_goalpoint: true
