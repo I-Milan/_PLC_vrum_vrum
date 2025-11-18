@@ -2,7 +2,7 @@ teszt2_wall_follower:
   ros__parameters:
     side: "left"
 
-    desired_distance: 1.5    # Cél távolság a követett faltól (m).
+    desired_distance: 0.35    # Cél távolság a követett faltól (m).
     lookahead_distance: 1.0   # A két-sugaras (backup PID) geometria előretekintési hossza.
 
     kp: 14.0
@@ -24,7 +24,7 @@ teszt2_wall_follower:
     angle_b_deg: 45.0          # Előre-oldal sugár szöge a backup PID-nél.
     forward_half_fov_deg: 15.0
 
-    follow_angle_deg: 45.0      # A goalpoint követő sugár szöge (a falhoz képest).
+    follow_angle_deg: 55.0      # A goalpoint követő sugár szöge (a falhoz képest).
                               # kisebb (pl. 35°): inkább előre néz, ha nagyob, akkor inkább oldalr afigyel
     lookahead_forward: 1.00   # A goalpont előrehozása tangens irányban (m).
     k_goal: 1.0               # A goalpont-szögből számolt w skálafaktora.
@@ -36,12 +36,12 @@ teszt2_wall_follower:
     polyline_left_topic:  "/polyline_left"
     polyline_right_topic: "/polyline_right"
     polyline_frame: "base_link"
-    min_poly_points: 6          # Minimum pontszám, hogy egy polyline „érvényesnek” számítson.
-    max_goal_jump: 2.0          # Ha a goalpont két frame között ennél nagyobbat ugrik (m), akkor az előző goal-t preferáljuk.
+    min_poly_points: 4          # Minimum pontszám, hogy egy polyline „érvényesnek” számítson.
+    max_goal_jump: 1.0          # Ha a goalpont két frame között ennél nagyobbat ugrik (m), akkor az előző goal-t preferáljuk.
 
     # Goal-jump alapú oldalváltás (ha kell)
     gp_jump_enable: true
-    gp_jump_thresh: 0.5         # Ennél nagyobb goal-ugrásnál (m) oldalváltás.
+    gp_jump_thresh: 0.3         # Ennél nagyobb goal-ugrásnál (m) oldalváltás.
     gp_jump_frames: 1           # Hány egymást követő frame-ben kell a nagy ugrásnak jelentkeznie.
     side_switch_hold_s: 0.0
 
@@ -58,7 +58,7 @@ polyline_builder:
     front_cut_deg: 15.0        # mekkora szöget vágjunk ki elöl (mindkét oldalon)
     keep_radius_delta: 0.8     # mennyivel lehet messzebb a "közeli faltól"
 
-    max_seg_len: 0.3            # Két szomszédos pont közti max. engedett távolság a polyline-ban.
+    max_seg_len: 0.2            # Két szomszédos pont közti max. engedett távolság a polyline-ban.
     max_angle_step_deg: 4.0      # Két szomszédos pont közti max. szög-lépés (radiánban számolunk belőle).
     viz_enable: true
     viz_lifetime: 0.0
