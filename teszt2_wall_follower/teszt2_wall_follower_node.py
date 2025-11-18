@@ -208,7 +208,13 @@ class WallFollower(Node):
         return err, theta, a, b, d_t
 
     # ------------ Raycast polyline mentén ------------
+        # ------------ Raycast polyline mentén ------------
     def _raycast_polyline(self, angle_rad: float):
+        """
+        Sugár–polyline metszés.
+        Visszaad: (r, nx, ny), ahol r a távolság, (nx, ny) egységnyi fal-normál,
+        amely a robot felé mutat. Ha nincs metszés: None.
+        """
         poly = self.poly_left if self.side == 'left' else self.poly_right
         if len(poly) < self.min_poly_points:
             return None
@@ -216,17 +222,18 @@ class WallFollower(Node):
         dx = math.cos(angle_rad)
         dy = math.sin(angle_rad)
 
-        best_t = None
+        best = None  # (t, nx, ny)
         for i in range(len(poly) - 1):
             x1, y1 = poly[i]
             x2, y2 = poly[i + 1]
             sx = x2 - x1
             sy = y2 - y1
 
-            # ray [0,0]+t[dx,dy], seg [x1,y1]+u[sx,sy]
+            # sugár: [0,0] + t[dx,dy]
+            # szakasz: [x1,y1] + u[sx,sy], u in [0,1]
             det = (-dx * sy + dy * sx)
             if abs(det) < 1e-9:
-                continue
+                continue  # párhuzamos / degenerált
 
             u = (-dy * x1 + dx * y1) / det
 
@@ -235,40 +242,86 @@ class WallFollower(Node):
             else:
                 t = (y1 + u * sy) / (dy if abs(dy) > 1e-9 else 1e-9)
 
-            if 0.0 <= u <= 1.0 and t is not None and t >= self.valid_min:
-                if best_t is None or t < best_t:
-                    best_t = t
+            if not (0.0 <= u <= 1.0 and t is not None and t >= self.valid_min):
+                continue
 
-        if best_t is not None and math.isfinite(best_t):
-            return min(best_t, self.range_clip_max)
-        return None
+            # metszéspont a falon
+            px = dx * t
+            py = dy * t
 
-    # ------------ Range follow-angle-nál (Polyline elsődleges) ------------
-    def _get_range_follow(self, scan: LaserScan, angle_rad: float) -> float:
-        r = None
-        if self._poly_active():
-            r = self._raycast_polyline(angle_rad)
-        if r is None:
-            # fallback: LiDAR
-            r = self._get_range_at_scan(scan, angle_rad, half_window=1)
-        return r
+            # szakasz tangense
+            tx = sx
+            ty = sy
+            tn = math.hypot(tx, ty)
+            if tn < 1e-6:
+                continue
+            tx /= tn
+            ty /= tn
 
-    # ------------ Goalpoint follow-angle alapján ------------
-    def _goalpoint_from_follow(self, scan: LaserScan):
-        a = math.radians(self.sign * self.follow_angle_deg)
-        r = self._get_range_follow(scan, a)
-        if not math.isfinite(r) or r >= self.range_clip_max:
+            # két lehetséges normál: (-ty, tx) és (ty, -tx)
+            nx = -ty
+            ny = tx
+
+            # irány: a robot (0,0) felé mutasson -> normál · (-p) > 0
+            if nx * (-px) + ny * (-py) < 0.0:
+                nx = -nx
+                ny = -ny
+
+            if best is None or t < best[0]:
+                best = (t, nx, ny)
+
+        if best is None:
             return None
 
-        px, py = r * math.cos(a), r * math.sin(a)
+        t, nx, ny = best
+        r = min(t, self.range_clip_max)
+        return r, nx, ny
+        # ------------ Range follow-angle-nál (Polyline elsődleges) ------------
+    def _get_range_follow(self, scan: LaserScan, angle_rad: float):
+        """
+        Visszaad: (r, nx, ny)
+        - r: távolság a falig a follow-szögben
+        - (nx, ny): egységnyi normálvektor, ami a robot felé mutat
+        """
+        # 1) Polyline, ha elérhető
+        if self._poly_active():
+            res = self._raycast_polyline(angle_rad)
+            if res is not None:
+                return res  # (r, nx, ny)
+
+        # 2) Fallback: nyers LiDAR, normál ≈ -p / |p|
+        r = self._get_range_at_scan(scan, angle_rad, half_window=1)
+        if not math.isfinite(r) or r >= self.range_clip_max:
+            return self.range_clip_max, 0.0, 0.0
+
+        px = r * math.cos(angle_rad)
+        py = r * math.sin(angle_rad)
         norm = math.hypot(px, py)
         if norm < 1e-6:
+            return r, 0.0, 0.0
+
+        nx = -px / norm
+        ny = -py / norm
+        return r, nx, ny
+
+
+        # ------------ Goalpoint follow-angle alapján ------------
+    def _goalpoint_from_follow(self, scan: LaserScan):
+        a = math.radians(self.sign * self.follow_angle_deg)
+        r, nx, ny = self._get_range_follow(scan, a)
+
+        if not math.isfinite(r) or r >= self.range_clip_max or (nx == 0.0 and ny == 0.0):
             return None
 
-        nx, ny = -px / norm, -py / norm
+        # metszéspont a falon a follow-szögben
+        px = r * math.cos(a)
+        py = r * math.sin(a)
+
+        # a fal normáljával toljuk el (nx, ny), ami a robot felé mutat
         gx = px + self.desired_current * nx + self.lookahead_forward
         gy = py + self.desired_current * ny
         return gx, gy
+
 
     # ------------ RViz vizualizáció ------------
     def _to_viz_frame(self, x, y):
