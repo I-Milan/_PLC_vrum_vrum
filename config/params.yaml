@@ -2,7 +2,7 @@ teszt2_wall_follower:
   ros__parameters:
     side: "left"
 
-    desired_distance: 0.35    # Cél távolság a követett faltól (m).
+    desired_distance: 1.0    # Cél távolság a követett faltól (m).
     lookahead_distance: 1.0   # A két-sugaras (backup PID) geometria előretekintési hossza.
 
     kp: 14.0
@@ -46,7 +46,6 @@ teszt2_wall_follower:
     side_switch_hold_s: 0.0
 
 
-
 polyline_builder:
   ros__parameters:
     frame_id: "base_link"
@@ -56,7 +55,7 @@ polyline_builder:
     range_clip_max: 5.0       # Maximum távolság, ameddig a LIDAR pontokat figyelembe vesszük.
 
     front_cut_deg: 15.0        # mekkora szöget vágjunk ki elöl (mindkét oldalon)
-    keep_radius_delta: 0.8     # mennyivel lehet messzebb a "közeli faltól"
+    keep_radius_delta: 1.4     # mennyivel lehet messzebb a "közeli faltól"
 
     max_seg_len: 0.2            # Két szomszédos pont közti max. engedett távolság a polyline-ban.
     max_angle_step_deg: 4.0      # Két szomszédos pont közti max. szög-lépés (radiánban számolunk belőle).

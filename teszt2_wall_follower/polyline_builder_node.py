@@ -33,8 +33,7 @@ class PolylineBuilder(Node):
         self.front_cut_deg = float(self.declare_parameter("front_cut_deg", 25.0).value)
         self.front_cut_rad = math.radians(self.front_cut_deg)
 
-        # csak a legközelebbi fal környékét hagyjuk meg:
-        # r <= r_min + keep_radius_delta
+        # Fal-szelekció: csak a "közeli" fal környéke maradjon
         self.keep_radius_delta = float(
             self.declare_parameter("keep_radius_delta", 0.8).value
         )
@@ -119,7 +118,6 @@ class PolylineBuilder(Node):
 
     # ------------ fő callback ---------------------------
     def scan_cb(self, scan: LaserScan):
-        # 1) pontok szétválogatása bal/jobb oldalra, front kivágással
         pts_left = []
         pts_right = []
 
@@ -132,20 +130,26 @@ class PolylineBuilder(Node):
                 continue
             r = min(r, self.range_clip_max)
 
-            # front zóna eldobása MINDKÉT oldalon
-            if abs(angle) < self.front_cut_rad:
+            # --- Szöget -pi..+pi tartományba hozzuk ---
+            ang_signed = (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+            # --- Front kivágása szimmetrikusan: [-front_cut, +front_cut] ---
+            if abs(ang_signed) < self.front_cut_rad:
                 angle += inc
                 continue
 
-            x = r * math.cos(angle)
-            y = r * math.sin(angle)
+            # --- Pont átszámítása (most már az ang_signed-et használjuk) ---
+            x = r * math.cos(ang_signed)
+            y = r * math.sin(ang_signed)
 
+            # bal/jobb oldal szétválogatás
             if y >= 0.0:
-                pts_left.append((x, y, angle, r))
+                pts_left.append((x, y, ang_signed, r))
             else:
-                pts_right.append((x, y, angle, r))
+                pts_right.append((x, y, ang_signed, r))
 
             angle += inc
+
 
         # ha valamelyik oldalon nincs pont, ne essünk szét
         def filter_by_radius(pts):

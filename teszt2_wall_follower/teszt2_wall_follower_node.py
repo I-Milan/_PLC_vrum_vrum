@@ -1,3 +1,4 @@
+
 import math
 from collections import deque
 
@@ -26,7 +27,7 @@ class MedianFilter:
         if not self.buf:
             return x
         s = sorted(self.buf)
-        return s[len(s) // 2]
+        return s[len(s)//2]
 
 
 class WallFollower(Node):
@@ -64,7 +65,7 @@ class WallFollower(Node):
         # Egyszerű LPF a kormányra
         self.steer_lpf_alpha = float(self.declare_parameter('steer_lpf_alpha', 0.5).value)
 
-        # Goalpoint mód (follow-angle)
+        # Goalpoint mód (follow_angle_deg alapján)
         self.follow_angle_deg = float(self.declare_parameter('follow_angle_deg', 45.0).value)
         self.lookahead_forward = float(self.declare_parameter('lookahead_forward', 1.00).value)
         self.k_goal = float(self.declare_parameter('k_goal', 1.0).value)
@@ -73,10 +74,11 @@ class WallFollower(Node):
         # Polyline használat
         self.use_polyline = bool(self.declare_parameter('use_polyline', True).value)
         self.min_poly_points = int(self.declare_parameter('min_poly_points', 6).value)
+        # outlier limit a goalpontra
         self.max_goal_jump = float(self.declare_parameter('max_goal_jump', 2.0).value)
 
-        # (Régi) goal-jump alapú oldalváltás – MOST NEM használjuk, de param maradhat
-        self.gp_jump_enable = bool(self.declare_parameter('gp_jump_enable', False).value)
+        # Oldalváltás goal-jump alapján
+        self.gp_jump_enable = bool(self.declare_parameter('gp_jump_enable', True).value)
         self.gp_jump_thresh = float(self.declare_parameter('gp_jump_thresh', 1.8).value)
         self.gp_jump_frames = int(self.declare_parameter('gp_jump_frames', 2).value)
         self.side_switch_hold_s = float(self.declare_parameter('side_switch_hold_s', 1.0).value)
@@ -142,12 +144,8 @@ class WallFollower(Node):
         self.poly_frame = msg.header.frame_id or "base_link"
 
     def _poly_active(self):
-        if not self.use_polyline:
-            return False
-        if self.side == 'left':
-            return len(self.poly_left) >= self.min_poly_points
-        else:
-            return len(self.poly_right) >= self.min_poly_points
+        pl = self.poly_left if self.side == 'left' else self.poly_right
+        return self.use_polyline and (len(pl) >= self.min_poly_points)
 
     # ------------ LiDAR helpers ------------
     def _wrap_angle_to_scan(self, angle_rad: float, scan: LaserScan) -> float:
@@ -209,13 +207,9 @@ class WallFollower(Node):
         err = self.desired - d_t
         return err, theta, a, b, d_t
 
-    # ------------ Raycast polyline mentén (aktuális oldal) ------------
+    # ------------ Raycast polyline mentén ------------
     def _raycast_polyline(self, angle_rad: float):
-        if self.side == 'left':
-            poly = self.poly_left
-        else:
-            poly = self.poly_right
-
+        poly = self.poly_left if self.side == 'left' else self.poly_right
         if len(poly) < self.min_poly_points:
             return None
 
@@ -229,7 +223,7 @@ class WallFollower(Node):
             sx = x2 - x1
             sy = y2 - y1
 
-            # ray [0,0]+t[dx,dy], szegmens [x1,y1]+u[sx,sy]
+            # ray [0,0]+t[dx,dy], seg [x1,y1]+u[sx,sy]
             det = (-dx * sy + dy * sx)
             if abs(det) < 1e-9:
                 continue
@@ -255,24 +249,33 @@ class WallFollower(Node):
         if self._poly_active():
             r = self._raycast_polyline(angle_rad)
         if r is None:
+            # fallback: LiDAR
             r = self._get_range_at_scan(scan, angle_rad, half_window=1)
         return r
 
-    # ------------ Goalpoint follow-angle alapján ------------
+    # ------------ Goalpoint follow-angle alapján (JAVÍTOTT LOGIKA) ------------
     def _goalpoint_from_follow(self, scan: LaserScan):
+        # 1) Követési szög (bal = +follow_angle_deg, jobb = -follow_angle_deg)
         a = math.radians(self.sign * self.follow_angle_deg)
+
+        # 2) Távolság a falig ezen a szögön (Polyline → raycast, fallback LiDAR)
         r = self._get_range_follow(scan, a)
         if not math.isfinite(r) or r >= self.range_clip_max:
             return None
 
+        # 3) Falpont a sugár mentén
         px, py = r * math.cos(a), r * math.sin(a)
-        norm = math.hypot(px, py)
-        if norm < 1e-6:
-            return None
 
-        nx, ny = -px / norm, -py / norm
-        gx = px + self.desired_current * nx + self.lookahead_forward
-        gy = py + self.desired_current * ny
+        # 4) BELSŐ irány a robot koordinátájában:
+        #    side="left"  -> belső: jobbra  (0, -1)
+        #    side="right" -> belső: balra   (0, +1)
+        inner_nx = 0.0
+        inner_ny = -self.sign
+
+        # 5) Goalpoint: falpont + belső offset + előre lookahead
+        gx = px + self.lookahead_forward * 1.0 + self.desired_current * inner_nx
+        gy = py + self.desired_current * inner_ny
+
         return gx, gy
 
     # ------------ RViz vizualizáció ------------
@@ -284,8 +287,8 @@ class WallFollower(Node):
             tx = t.transform.translation.x
             ty = t.transform.translation.y
             q = t.transform.rotation
-            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            siny_cosp = 2*(q.w*q.z + q.x*q.y)
+            cosy_cosp = 1 - 2*(q.y*q.y + q.z*q.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
             cy = math.cos(yaw)
             sy = math.sin(yaw)
@@ -362,9 +365,34 @@ class WallFollower(Node):
         if self.use_goalpoint:
             gp_raw = self._goalpoint_from_follow(scan)
 
+            # goal-jump alapú oldalváltás (ha bekapcsolva)
+            if self.gp_jump_enable and gp_raw is not None:
+                if self._last_goal is not None:
+                    dx = gp_raw[0] - self._last_goal[0]
+                    dy = gp_raw[1] - self._last_goal[1]
+                    jump = math.hypot(dx, dy)
+                    if jump > self.gp_jump_thresh:
+                        self._gp_jump_count += 1
+                    else:
+                        self._gp_jump_count = 0
+
+                    if (self._gp_jump_count >= self.gp_jump_frames and
+                        (now - self.last_switch_t) > self.side_switch_hold_s):
+                        old = self.side
+                        self.sign *= -1.0
+                        self.side = 'left' if self.sign > 0 else 'right'
+                        self.last_switch_t = now
+                        self.angle_a = math.radians(self.sign * self.angle_a_deg)
+                        self.angle_b = math.radians(self.sign * self.angle_b_deg)
+                        self._w_filt = 0.0
+                        self._last_goal = None
+                        self._gp_jump_count = 0
+                        self.get_logger().info(f'[SWITCH] {old} -> {self.side} (goal jump {jump:.2f} m)')
+                        gp_raw = self._goalpoint_from_follow(scan)
+                self._last_goal = gp_raw
+
         # --------- Goalpoint ág ---------
         if gp_raw is not None:
-            # egyszerű outlier-szűrés a goalpontra
             gp = gp_raw
             if self._last_goal is not None:
                 dx = gp_raw[0] - self._last_goal[0]
