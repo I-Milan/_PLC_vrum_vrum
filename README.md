@@ -18,6 +18,9 @@ itt az Rvizben:
 Add-> Marker Array-> topic: /goal_viz
 
 (goal pontok megjelenitese a robot elott)
+Add-> Path-> topic: polyline_left
+Add-> Path-> topic: polyline_right
+(Polyilne_builder_node által publish-olt fal vonalak)
 
 uj terminalba
 
