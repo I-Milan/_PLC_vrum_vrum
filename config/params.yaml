@@ -2,32 +2,32 @@ teszt2_wall_follower:
   ros__parameters:
     side: "left"
 
-    desired_distance: 1.0    # Cél távolság a követett faltól (m).
-    lookahead_distance: 1.0   # A két-sugaras (backup PID) geometria előretekintési hossza.
+    desired_distance: 0.40    # Cél távolság a követett faltól (m).
+    #lookahead_distance: 1.0   # A két-sugaras (backup PID) geometria előretekintési hossza.
 
-    kp: 14.0
-    ki: 0.0
-    kd: 0.09
+    #p: 14.0
+    #ki: 0.0
+    #kd: 0.09
 
-    linear_speed: 0.4
+    linear_speed: 0.3
     linear_speed_min: 0.3
     angular_speed_limit: 4.8  # Max. szögsebesség (|w|) rad/s – kormányzás korlátja.
 
     slow_down_distance: 0.25
     stop_distance: 0.18
 
-    median_window: 5          # Medián szűrő ablakméret a backup PID hibájára.
-    range_clip_max: 10.0      # Max. távolság, amire a LIDAR méréseket „levágjuk”.
-    valid_min: 0.03            # Minimális érvényes LIDAR távolság (m). Ez alatti mérések kuka.
+    #median_window: 5          # Medián szűrő ablakméret a backup PID hibájára.
+    #range_clip_max: 10.0      # Max. távolság, amire a LIDAR méréseket „levágjuk”.
+    #valid_min: 0.03            # Minimális érvényes LIDAR távolság (m). Ez alatti mérések kuka.
 
-    angle_a_deg: 90.0         # Oldalsó sugár szöge a backup PID-nél.
-    angle_b_deg: 45.0          # Előre-oldal sugár szöge a backup PID-nél.
+    #angle_a_deg: 90.0         # Oldalsó sugár szöge a backup PID-nél.
+    #angle_b_deg: 45.0          # Előre-oldal sugár szöge a backup PID-nél.
     forward_half_fov_deg: 15.0
 
     follow_angle_deg: 55.0      # A goalpoint követő sugár szöge (a falhoz képest).
                               # kisebb (pl. 35°): inkább előre néz, ha nagyob, akkor inkább oldalr afigyel
     lookahead_forward: 0.500   # A goalpont előrehozása tangens irányban (m).
-    k_goal: 1.0               # A goalpont-szögből számolt w skálafaktora.
+    k_goal: 1.2               # A goalpont-szögből számolt w skálafaktora.
                               # kisebb: lustábban fordul a goal felé, nagyobb: agresszívebben mozdul a goal irányába,
     use_goalpoint: true
 
