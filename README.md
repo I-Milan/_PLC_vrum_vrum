@@ -1,9 +1,9 @@
 # _PLC_vrum_vrum
-A 2025/2026/1 félév leggyorsabb robot versenyautó kódjának fejlesztésee
+A 2025/2026/1 félév leggyorsabb robot versenyautó kódjának fejlesztése
 
+Fejlesztették: Vass Levente (FNO5TU), Istiván Milán (U9YTQZ)
 
-
-hasznalat:
+Használat:
 
 colcon build
 
@@ -17,7 +17,7 @@ itt az Rvizben:
 
 Add-> Marker Array-> topic: /goal_viz
 
-(goal pontok megjelenitese a robot elott)
+(goal pontok megjelenítese a robot előtt)
 
 Add-> Path-> topic: polyline_left
 
@@ -25,7 +25,7 @@ Add-> Path-> topic: polyline_right
 
 (Polyilne_builder_node által publish-olt fal vonalak)
 
-uj terminalba
+Új terminálba:
 
 source insall/setup.bash
 
