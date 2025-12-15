@@ -25,6 +25,8 @@ Add-> Path-> topic: polyline_right
 
 (Polyilne_builder_node által publish-olt fal vonalak)
 
+Ezt követően javasoljuk a laser kikapcsolását, mert úgy jobban látszanak a fal-vonalak
+
 Új terminálba:
 
 source insall/setup.bash
