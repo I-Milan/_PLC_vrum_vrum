@@ -19,6 +19,8 @@ Add-> Marker Array-> topic: /goal_viz
 
 (goal pontok megjelenítese a robot előtt)
 
+A Marker jobban látszik, hogyha a Steering jelölése ki van kapcsolva
+
 Add-> Path-> topic: polyline_left
 
 Add-> Path-> topic: polyline_right
