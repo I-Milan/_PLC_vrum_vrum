@@ -2,7 +2,7 @@ teszt2_wall_follower:
   ros__parameters:
     side: "left"
 
-    desired_distance: 0.40    # Cél távolság a követett faltól (m).
+    desired_distance: 1.0    # Cél távolság a követett faltól (m).
     
     linear_speed: 0.3
     linear_speed_min: 0.3
@@ -13,10 +13,10 @@ teszt2_wall_follower:
 
     forward_half_fov_deg: 15.0
 
-    follow_angle_deg: 55.0      # A goalpoint követő sugár szöge (a falhoz képest).
+    follow_angle_deg: 45.0      # A goalpoint követő sugár szöge (a falhoz képest).
                               # kisebb (pl. 35°): inkább előre néz, ha nagyob, akkor inkább oldalr afigyel
-    lookahead_forward: 0.500   # A goalpont előrehozása tangens irányban (m).
-    k_goal: 1.2               # A goalpont-szögből számolt w skálafaktora.
+    lookahead_forward: 1.0   # A goalpont előrehozása tangens irányban (m).
+    k_goal: 1.0               # A goalpont-szögből számolt w skálafaktora.
                               # kisebb: lustábban fordul a goal felé, nagyobb: agresszívebben mozdul a goal irányába,
     use_goalpoint: true
 
